@@ -4,35 +4,29 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"syscall"
 )
 
 const (
-	AF_INET  = 2  // IPv4
-	AF_INET6 = 10 // IPv6
-)
-
-const (
-	EventSniffers  = 1
-	EventTcpStream = 2
+	EventTcpStream = 1
+	EventSniffers  = 2
 )
 
 func ToFilterBpfLpmTrieKeyV4(ip netip.Prefix) FilterBpfLpmTrieKeyV4 {
-	buf := ip.Addr().As4()
 	return FilterBpfLpmTrieKeyV4{
-		Prefixlen: uint8(ip.Bits()),
-		Data:      binary.BigEndian.Uint32(buf[:]),
+		Prefixlen: uint32(ip.Bits()),
+		Data:      ip.Addr().As4(),
 	}
 }
 
 func FromFilterBpfLpmTrieKeyV4(key FilterBpfLpmTrieKeyV4) netip.Prefix {
-	var ip [4]byte
-	binary.BigEndian.PutUint32(ip[:], key.Data)
-	return netip.PrefixFrom(netip.AddrFrom4(ip), int(key.Prefixlen))
+	return netip.PrefixFrom(netip.AddrFrom4(key.Data), int(key.Prefixlen))
 }
 
 type TcpStream struct {
 	Src  netip.AddrPort
 	Dest netip.AddrPort
+	Mark uint32
 }
 
 const TcpStreamBufferSize = 37
@@ -47,8 +41,10 @@ func ParseTcpStream(buf []byte, v *TcpStream) error {
 	)
 	kind := buf[0]
 	buf = buf[1:]
+	v.Mark = binary.NativeEndian.Uint32(buf)
+	buf = buf[4:]
 	switch kind {
-	case AF_INET:
+	case syscall.AF_INET:
 		saddr = netip.AddrFrom4([4]byte(buf))
 		buf = buf[4:]
 		daddr = netip.AddrFrom4([4]byte(buf))
@@ -56,7 +52,7 @@ func ParseTcpStream(buf []byte, v *TcpStream) error {
 		sport = binary.BigEndian.Uint16(buf)
 		buf = buf[2:]
 		dport = binary.BigEndian.Uint16(buf)
-	case AF_INET6:
+	case syscall.AF_INET6:
 		saddr = netip.AddrFrom16([16]byte(buf))
 		buf = buf[16:]
 		daddr = netip.AddrFrom16([16]byte(buf))

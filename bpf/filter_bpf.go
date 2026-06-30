@@ -14,9 +14,8 @@ import (
 
 type FilterBpfLpmTrieKeyV4 struct {
 	_         structs.HostLayout
-	Prefixlen uint8
-	_         [3]byte
-	Data      uint32
+	Prefixlen uint32
+	Data      [4]uint8
 }
 
 // Names of all BPF objects in the ELF.
