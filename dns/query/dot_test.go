@@ -91,7 +91,7 @@ func TestDoT_Query_Insecure(t *testing.T) {
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
-	r, _, err := q.Query(m)
+	r, _, err := q.Query(context.Background(), m)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDoT_Query_CertVerifyFails(t *testing.T) {
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
-	if _, _, err := q.Query(m); err == nil {
+	if _, _, err := q.Query(context.Background(), m); err == nil {
 		t.Error("Query() error = nil, want TLS verification error")
 	}
 }

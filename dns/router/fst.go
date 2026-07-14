@@ -21,6 +21,14 @@ func (f *fst) Length() int64 {
 	return int64(f.fst.Len())
 }
 
+func (f *fst) Delete(domain string) {
+	panic("implement me")
+}
+
+func (f *fst) Set(domain string, t MatchType, fw uint32) {
+	panic("implement me")
+}
+
 func (f *fst) Match(domain string) (uint32, bool) {
 	domain = strings.TrimSuffix(domain, ".")
 	parts := splitDomainBytes(sconv.ByteSlice(domain))

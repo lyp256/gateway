@@ -1,6 +1,7 @@
 package query
 
 import (
+	"context"
 	"net/netip"
 	"sync"
 	"testing"
@@ -73,7 +74,7 @@ func TestStatic_Query(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _, err := q.Query(tt.msg)
+			r, _, err := q.Query(context.Background(), tt.msg)
 			if err != nil {
 				t.Fatalf("Query() error = %v", err)
 			}
@@ -105,7 +106,7 @@ func TestStatic_Query(t *testing.T) {
 func TestStatic_Query_NoQuestion(t *testing.T) {
 	q := NewStatic(nil, &sync.Mutex{})
 	m := new(dns.Msg)
-	r, _, err := q.Query(m)
+	r, _, err := q.Query(context.Background(), m)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}

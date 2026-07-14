@@ -67,6 +67,11 @@ func (ctl *controller) handleEvent(ctx context.Context) error {
 	defer rd.Close()
 
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		record, err := rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
@@ -116,7 +121,6 @@ func getDefaultGatewayInterface() (netlink.Link, error) {
 			return link, nil
 		}
 	}
-
 	return nil, fmt.Errorf("未找到默认路由网卡")
 }
 

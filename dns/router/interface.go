@@ -10,6 +10,8 @@ import (
 type Router interface {
 	Match(domain string) (uint32, bool)
 	Length() int64
+	Set(domain string, t MatchType, fwmark uint32)
+	Delete(domain string)
 }
 
 const (

@@ -3,10 +3,11 @@ package dao
 import "strings"
 
 const (
-	prefixSplit       = ":"
+	prefixSplit      = ":"
 	PrefixDomainRule = "dr:"
-	PrifixCidr        = "cidr:"
-	PrefixHosts       = "host:"
+	PrifixCidr       = "cidr:"
+	PrefixHosts      = "host:"
+	PrefixTunnel     = "tunnel:"
 )
 
 func MarshalKey(prefix, key string) string {
@@ -25,5 +26,3 @@ func TrimKeyPrefix(s string) string {
 	_, key := ParseKey(s)
 	return key
 }
-
-

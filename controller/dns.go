@@ -26,16 +26,23 @@ import (
 var ErrNotExistOriginalDst = errors.New("not exist origin dest addr")
 
 func (ctl *controller) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+	startTime := time.Now()
+	success := ctl.queryDNS(ctx, w, r)
+	d := time.Since(startTime).Seconds()
+	if success {
+		ctl.dnsQuerySucceedDurationSecond().Update(d)
+	} else {
+		ctl.dnsQueryFailedDurationSecond().Update(d)
 
-	ctl.queryDNS(ctx, w, r)
+	}
+
 }
 
 // ServeDNS implements [dns.Handler].
 //
 // 依次尝试从 ctl.dnsServers 中解析 dns：任一上游返回成功且带有应答记录即采用，
 // 否则回退到下一个上游。全部上游都失败时返回 SERVFAIL。
-func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
-	ctl.dnsQueryTotal.Inc()
+func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) bool {
 	for _, srv := range ctl.dnsServers {
 		resp, _, err := srv.Query(ctx, r)
 		if err != nil || resp == nil {
@@ -69,18 +76,19 @@ func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 			if err := resp.Pack(); err == nil {
 				_, _ = io.Copy(w, resp)
 			}
-			ctl.dnsQuerySucceed.Inc()
-			return
+			ctl.dnsQuerySucceed().Inc()
+			return true
 		}
 
 	}
-	ctl.dnsQueryFailed.Inc()
+	ctl.dnsQueryFailed().Inc()
 	resp := new(dns.Msg)
 	dnsutil.SetReply(resp, r)
 	resp.Rcode = dns.RcodeServerFailure
 	if err := resp.Pack(); err == nil {
 		_, _ = io.Copy(w, resp)
 	}
+	return false
 }
 
 func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, server netip.AddrPort) {
