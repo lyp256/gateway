@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -39,11 +40,11 @@ func (ctl *controller) getDomainRules(ctx context.Context, _ *struct{}) (*schema
 }
 
 func (ctl *controller) setDomainRule(ctx context.Context, in *schema.Body[dao.DomainRule]) (*schema.Body[dao.DomainRule], error) {
-
 	err := ctl.storage.SetDomainRule(in.Body)
 	if err != nil {
 		return nil, huma.NewError(500, "create data", err)
 	}
+	ctl.dnsTable.Set(in.Body.Domain, in.Body.Match, in.Body.Fwmark)
 	return schema.NewBody(in.Body), nil
 }
 
@@ -63,6 +64,7 @@ func (ctl *controller) deleteDomainRule(ctx context.Context, i *struct {
 	if err != nil {
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
+	ctl.dnsTable.Delete(parts[1])
 	return nil, nil
 }
 
@@ -95,5 +97,45 @@ func (ctl *controller) deleteHosts(ctx context.Context, in *struct {
 	ctl.hostsMux.Lock()
 	delete(ctl.hosts, in.Host)
 	ctl.hostsMux.Unlock()
+	return nil, nil
+}
+
+func (ctl *controller) getTunnels(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.Tunnel], error) {
+	list, err := ctl.storage.ListTunnel()
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(list), nil
+}
+
+func (ctl *controller) getTunnel(ctx context.Context, in *struct {
+	Name string `path:"name"`
+}) (*schema.Body[dao.Tunnel], error) {
+	tun, err := ctl.storage.GetTunnel(in.Name)
+	if err != nil {
+		if errors.Is(err, dao.ErrKeyNotFound) {
+			return nil, huma.NewError(http.StatusNotFound, "tunnel not found")
+		}
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(tun), nil
+}
+
+func (ctl *controller) setTunnel(ctx context.Context, in *schema.Body[dao.Tunnel]) (*schema.Body[dao.Tunnel], error) {
+	if in.Body.Name == "" {
+		return nil, huma.NewError(http.StatusBadRequest, "tunnel name is required")
+	}
+	if err := ctl.storage.SetTunnel(in.Body); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(in.Body), nil
+}
+
+func (ctl *controller) deleteTunnel(ctx context.Context, in *struct {
+	Name string `path:"name"`
+}) (*struct{}, error) {
+	if err := ctl.storage.DeleteTunnel(in.Name); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
 	return nil, nil
 }

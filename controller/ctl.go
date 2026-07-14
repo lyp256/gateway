@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/lyp256/gateway/bpf"
 	"github.com/lyp256/gateway/dao"
+	tunnelhttp "github.com/lyp256/gateway/tunnel/http"
 
 	"github.com/lyp256/gateway/dns/query"
 	"github.com/lyp256/gateway/dns/router"
@@ -47,6 +48,8 @@ func NewController(storage *dao.Dao, dnsServers []query.DNSQuerier, e chi.Router
 }
 
 type controller struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 	// dns 本地解析 map 锁
 	hostsMux *sync.RWMutex
 	// 本地 dns map
@@ -71,13 +74,21 @@ type controller struct {
 	http chi.Router
 
 	// metrics
-	metricsSet      *metrics.Set
-	dnsQueryTotal   *metrics.Counter
-	dnsQuerySucceed *metrics.Counter
-	dnsQueryFailed  *metrics.Counter
+	metricsSet *metrics.Set
+
+	tunifMux sync.RWMutex
+	tunifs   map[string]*tunIF
 
 	waitReadCh chan struct{}
 	ready      bool
+}
+
+type tunIF struct {
+	cancel  context.CancelFunc
+	client  tunnelhttp.TunnelClient
+	tun     dao.Tunnel
+	ready   bool
+	lastErr error
 }
 
 type dnsEvent struct {
@@ -86,28 +97,32 @@ type dnsEvent struct {
 }
 
 func (ctl *controller) Run(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	ctl.ctx, ctl.cancel = context.WithCancel(ctx)
+	defer ctl.cancel()
 	err := loadHostsFromStorage(ctl.storage, ctl.hosts)
 	if err != nil {
 		return err
 	}
-
+	err = ctl.loadTunnelsFromStorage(ctl.ctx, ctl.storage)
+	if err != nil {
+		return err
+	}
 	routeMap := make(map[string]uint64)
-	ctl.dnsTable = router.NewMemoryMap(routeMap, &sync.Mutex{})
 	err = loadDomainRuleMapFromStorage(ctl.storage, routeMap)
 	if err != nil {
 		return err
 	}
+	ctl.dnsTable = router.NewMemoryMap(routeMap)
+
 	errCh := make(chan error)
 	go func() {
-		errCh <- ctl.bpfServer(ctx)
+		errCh <- ctl.bpfServer(ctl.ctx)
 	}()
 	ctl.ready = true
 	close(ctl.waitReadCh)
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
+	case <-ctl.ctx.Done():
+		return ctl.ctx.Err()
 	case err := <-errCh:
 		return err
 	}

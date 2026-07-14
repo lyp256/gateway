@@ -1,6 +1,7 @@
 package query
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,7 @@ func TestDoH_Query(t *testing.T) {
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
-	r, rtt, err := q.Query(m)
+	r, rtt, err := q.Query(context.Background(), m)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
@@ -98,7 +99,7 @@ func TestDoH_Query_Non200(t *testing.T) {
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
-	if _, _, err := q.Query(m); err == nil {
+	if _, _, err := q.Query(context.Background(), m); err == nil {
 		t.Error("Query() error = nil, want error for non-200 status")
 	}
 }
@@ -113,7 +114,7 @@ func TestDoH_Query_CertVerifyFails(t *testing.T) {
 	m := new(dns.Msg)
 	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
-	if _, _, err := q.Query(m); err == nil {
+	if _, _, err := q.Query(context.Background(), m); err == nil {
 		t.Error("Query() error = nil, want TLS verification error")
 	}
 }

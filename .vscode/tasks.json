@@ -5,20 +5,52 @@
             "label": "clean-debug-bin",
             "type": "process",
             "command": "rm",
-            "args": ["-f", "${workspaceFolder}/bin/gateway"]
+            "args": [
+                "-f",
+                "${workspaceFolder}/bin/gateway"
+            ]
         },
         {
             "label": "build-debug",
             "type": "process",
             "command": "make",
-            "args": ["build-debug"],
-            "dependsOn": ["clean-debug-bin"],
+            "args": [
+                "build-debug"
+            ],
+            "dependsOn": [
+                "clean-debug-bin"
+            ],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
             "problemMatcher": "$go"
+        },
+        {
+            "label": "run-tunnel-client-debug",
+            "type": "process",
+            "command": "make",
+            "isBackground": true,
+            "args": [
+                "run-tunnel-client-debug"
+            ],
+            "dependsOn": [
+                "build-debug"
+            ],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": {
+                "base": "$go",
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*",
+                    "endsPattern": "API server listening at:.*"
+                }
+            }
         }
     ]
 }
