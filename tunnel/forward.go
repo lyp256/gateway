@@ -3,10 +3,12 @@ package tunnel
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -42,7 +44,6 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 	for i := range bufs {
 		star, end := i*bufSize, (i+1)*bufSize
 		bufs[i] = buf[star:end:end]
-		sizes[i] = bufSize
 	}
 	for {
 		select {
@@ -89,44 +90,82 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 	}
 }
 
-func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.Reader) error {
+func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadCloser) error {
 	mtu, err := dev.MTU()
 	if err != nil {
 		return err
 	}
+	bufSize := mtu + tunOffset
+	batchSize := dev.BatchSize()
+	batch := newBatchWrite(bufSize, batchSize)
 
-	buf := make([]byte, mtu+tunOffset)
-	packet := buf[tunOffset:]
-	for {
-		_, err := io.ReadFull(stream, packet[:20])
+	wg := sync.WaitGroup{}
+	wg.Add(2)
+	errCh := make(chan []error, 1)
+	go func() {
+		defer wg.Done()
+		err = batch.run(dev, time.Millisecond)
 		if err != nil {
-			return fmt.Errorf("stream.Read:%w", err)
+			errs := <-errCh
+			errs = append(errs, fmt.Errorf("batch run:%w", err))
+			errCh <- errs
 		}
+		_ = stream.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		defer func() {
+			_ = dev.Close()
+		}()
+		buf := batch.swapBuf(nil)
+		packet := buf[tunOffset:]
+		for {
+			_, err := io.ReadFull(stream, packet[:20])
+			if err != nil {
+				errs := <-errCh
+				errs = append(errs, fmt.Errorf("stream.Read:%w", err))
+				errCh <- errs
+				return
+			}
 
-		var n int
-		switch packet[0] >> 4 {
-		case 4:
-			ihl := int(packet[0]&0x0f) * 4
-			n = int(binary.BigEndian.Uint16(packet[2:4]))
-			if ihl < 20 || n < ihl || n > mtu {
-				return fmt.Errorf("invalid ipv4 packet size:%d", n)
+			var n int
+			switch packet[0] >> 4 {
+			case 4:
+				ihl := int(packet[0]&0x0f) * 4
+				n = int(binary.BigEndian.Uint16(packet[2:4]))
+				if ihl < 20 || n < ihl || n > mtu {
+					errs := <-errCh
+					errs = append(errs, fmt.Errorf("invalid ipv4 packet size:%d", n))
+					errCh <- errs
+					return
+				}
+			case 6:
+				n = 40 + int(binary.BigEndian.Uint16(packet[4:6]))
+				if n > mtu {
+					errs := <-errCh
+					errs = append(errs, fmt.Errorf("invalid ipv6 packet size:%d", n))
+					errCh <- errs
+					return
+
+				}
+			default:
+				errs := <-errCh
+				errs = append(errs, fmt.Errorf("invalid ip version:%d", packet[0]>>4))
+				errCh <- errs
+				return
 			}
-		case 6:
-			n = 40 + int(binary.BigEndian.Uint16(packet[4:6]))
-			if n > mtu {
-				return fmt.Errorf("invalid ipv6 packet size:%d", n)
+			if _, err = io.ReadFull(stream, packet[20:n]); err != nil {
+				errs := <-errCh
+				errs = append(errs, fmt.Errorf("stream.Read:%w", err))
+				errCh <- errs
+				return
 			}
-		default:
-			return fmt.Errorf("invalid ip version:%d", packet[0]>>4)
+			buf = batch.swapBuf(buf)
+			packet = buf[tunOffset:]
 		}
-		if _, err = io.ReadFull(stream, packet[20:n]); err != nil {
-			return fmt.Errorf("stream.Read:%w", err)
-		}
-		_, err = dev.Write([][]byte{buf[:tunOffset+n]}, tunOffset)
-		if err != nil {
-			return fmt.Errorf("tun.Write:%w", err)
-		}
-	}
+	}()
+	wg.Wait()
+	return errors.Join(<-errCh...)
 }
 
 func writeAll(w io.Writer, buf []byte) error {
@@ -144,14 +183,36 @@ func writeAll(w io.Writer, buf []byte) error {
 }
 
 type batchWrite struct {
-	emptyBufCh chan []byte
-	readyBufs  [][]byte
+	zeroSample []byte
+	bufPool    chan []byte
 	fullCh     chan struct{}
+	readyBufs  [][]byte
+	mux        sync.Mutex
 }
 
-func (b *batchWrite) getBuf() []byte {
+func newBatchWrite(bufSize, batchSize int) *batchWrite {
+	buf := make([]byte, batchSize*bufSize)
+	b := batchWrite{
+		zeroSample: make([]byte, bufSize),
+		bufPool:    make(chan []byte, batchSize),
+		fullCh:     make(chan struct{}),
+		readyBufs:  nil,
+	}
+	for i := 0; i < batchSize; i++ {
+		star, end := i*bufSize, (i+1)*bufSize
+		b.bufPool <- buf[star:end:end]
+	}
+	return &b
+}
+
+func (b *batchWrite) swapBuf(in []byte) []byte {
+	if in != nil {
+		b.mux.Lock()
+		b.readyBufs = append(b.readyBufs, in)
+		b.mux.Unlock()
+	}
 	select {
-	case buf := <-b.emptyBufCh:
+	case buf := <-b.bufPool:
 		return buf
 	default:
 	}
@@ -159,13 +220,38 @@ func (b *batchWrite) getBuf() []byte {
 	case b.fullCh <- struct{}{}:
 	default:
 	}
-	return <-b.emptyBufCh
+	return <-b.bufPool
 }
 
 func (b *batchWrite) run(dev tun.Device, d time.Duration) error {
-	timer := time.NewTimer(d)
-	select {
-	case <-timer.C:
-	case <-b.fullCh:
+	timer := time.NewTicker(d)
+	for {
+		select {
+		case <-timer.C:
+		case <-b.fullCh:
+		}
+		err := b.write(dev)
+		if err != nil {
+			return err
+		}
 	}
+
+}
+
+func (b *batchWrite) write(dev tun.Device) error {
+	b.mux.Lock()
+	defer b.mux.Unlock()
+	if len(b.readyBufs) == 0 {
+		return nil
+	}
+	_, err := dev.Write(b.readyBufs, tunOffset)
+	if err != nil {
+		return err
+	}
+	for _, buf := range b.readyBufs {
+		buf = append(buf, b.zeroSample[:cap(buf)-len(buf)]...)
+		b.bufPool <- buf
+	}
+	b.readyBufs = b.readyBufs[:0]
+	return nil
 }
