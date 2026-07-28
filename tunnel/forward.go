@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -34,10 +35,13 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 		return err
 	}
 	bufSize := mtu + tunOffset
-	bufs := make([][]byte, dev.BatchSize())
-	sizes := make([]int, dev.BatchSize())
+	batchSize := dev.BatchSize()
+	bufs := make([][]byte, batchSize)
+	sizes := make([]int, batchSize)
+	buf := make([]byte, batchSize*bufSize)
 	for i := range bufs {
-		bufs[i] = make([]byte, bufSize)
+		star, end := i*bufSize, (i+1)*bufSize
+		bufs[i] = buf[star:end:end]
 		sizes[i] = bufSize
 	}
 	for {
@@ -137,4 +141,31 @@ func writeAll(w io.Writer, buf []byte) error {
 		buf = buf[n:]
 	}
 	return nil
+}
+
+type batchWrite struct {
+	emptyBufCh chan []byte
+	readyBufs  [][]byte
+	fullCh     chan struct{}
+}
+
+func (b *batchWrite) getBuf() []byte {
+	select {
+	case buf := <-b.emptyBufCh:
+		return buf
+	default:
+	}
+	select {
+	case b.fullCh <- struct{}{}:
+	default:
+	}
+	return <-b.emptyBufCh
+}
+
+func (b *batchWrite) run(dev tun.Device, d time.Duration) error {
+	timer := time.NewTimer(d)
+	select {
+	case <-timer.C:
+	case <-b.fullCh:
+	}
 }
