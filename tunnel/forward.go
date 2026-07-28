@@ -34,10 +34,13 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 		return err
 	}
 	bufSize := mtu + tunOffset
-	bufs := make([][]byte, dev.BatchSize())
-	sizes := make([]int, dev.BatchSize())
+	batchSize := dev.BatchSize()
+	bufs := make([][]byte, batchSize)
+	sizes := make([]int, batchSize)
+	buf := make([]byte, batchSize*bufSize)
 	for i := range bufs {
-		bufs[i] = make([]byte, bufSize)
+		star, end := i*bufSize, (i+1)*bufSize
+		bufs[i] = buf[star:end:end]
 		sizes[i] = bufSize
 	}
 	for {
