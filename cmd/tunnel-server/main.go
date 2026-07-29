@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+
 	"net/netip"
 	"os"
 	"os/signal"
@@ -13,8 +14,13 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/lyp256/gateway/pprof"
 	tunnelHttp "github.com/lyp256/gateway/tunnel/http"
 )
+
+func init() {
+	pprof.DebugServerWithENV()
+}
 
 func main() {
 	mtu := pflag.Uint16P("mtu", "", 1500, "tunnel device mtu")
@@ -30,25 +36,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	handler, err := tunnelHttp.NewServer(*mtu, *devName, cidr)
+	tunnelServer, err := tunnelHttp.NewServer(*mtu, *devName, cidr)
 	if err != nil {
 		slog.Error("create tunnel server", "error", err)
 		os.Exit(1)
 	}
 	go func() {
-		err = handler.Run(ctx)
+		err = tunnelServer.Run(ctx)
 		if err != nil {
 			slog.Error(" handler.Run", "error", err)
 			os.Exit(1)
 		}
 	}()
 
+	mux := http.NewServeMux()
+	mux.Handle("/", tunnelServer)
+
 	protocols := new(http.Protocols)
 	protocols.SetUnencryptedHTTP2(true)
 	protocols.SetHTTP1(true)
 	server := &http.Server{
 		Addr:      fmt.Sprintf(":%d", *port),
-		Handler:   handler,
+		Handler:   mux,
 		Protocols: protocols,
 	}
 	err = server.ListenAndServe()

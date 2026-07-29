@@ -57,6 +57,11 @@ func (m *tunnelModule) Provision(ctx caddy.Context) error {
 		return err
 	}
 	m.server = handeler
+	go func() {
+		if err := m.server.Run(ctx); err != nil {
+			m.logger.Error("run tunnel forwarder", zap.Error(err))
+		}
+	}()
 
 	return nil
 }

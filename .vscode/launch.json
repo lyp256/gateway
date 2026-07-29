@@ -28,6 +28,9 @@
             "type": "go",
             "request": "launch",
             "mode": "exec",
+            "env": {
+                "DEBUG_ADDR": ":12080"
+            },
             "asRoot": true,
             "console": "integratedTerminal",
             "program": "${workspaceFolder}/bin/tunnel-server",

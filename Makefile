@@ -44,7 +44,4 @@ clear-testns:
 	sudo ip link del ${VETHHOSTNAME}
 
 run-tunnel-client-debug:
-	sudo ip netns exec ${TESTNS} $(DLVBINARY) exec ./bin/tunnel-client --headless --listen=:2345 --api-version=2  -- --url=${TUNNELSERVER}
-
-ec:
-	echo ${DLVBINARY}
+	sudo ip netns exec ${TESTNS} env DEBUG_ADDR=":12080" $(DLVBINARY) exec ./bin/tunnel-client --headless --listen=:2345 --api-version=2  -- --url=${TUNNELSERVER}

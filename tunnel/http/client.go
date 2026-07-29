@@ -48,25 +48,33 @@ type TunnelClient struct {
 }
 
 func (t *TunnelClient) Run(ctx context.Context) error {
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	var errs []error
+	errCh := make(chan error, 2)
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			_ = t.stream.Close()
+			_ = t.device.Close()
+		})
+	}
 	go func() {
-		defer wg.Done()
-		err := tunnel.ForwardStreamToTun(ctx, t.device, t.stream)
+		defer stop()
+		err := tunnel.ClientForwardStreamToTun(ctx, t.device, t.stream)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("client.ForwardStreamToTun:%w", err))
+			errCh <- fmt.Errorf("client.ForwardStreamToTun:%w", err)
+			return
 		}
+		errCh <- nil
 	}()
 	go func() {
-		defer wg.Done()
+		defer stop()
 		err := tunnel.ClientForwardTunToStream(ctx, t.device, t.stream)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("client.ForwardTunToStream:%w", err))
+			errCh <- fmt.Errorf("client.ForwardTunToStream:%w", err)
+			return
 		}
+		errCh <- nil
 	}()
-	wg.Wait()
-	return errors.Join(errs...)
+	return errors.Join(<-errCh, <-errCh)
 }
 
 func (t *TunnelClient) Close() error {

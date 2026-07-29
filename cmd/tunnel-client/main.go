@@ -9,9 +9,14 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/lyp256/gateway/pprof"
 	tunnelHttp "github.com/lyp256/gateway/tunnel/http"
 	"github.com/spf13/pflag"
 )
+
+func init() {
+	pprof.DebugServerWithENV()
+}
 
 func main() {
 	u := pflag.StringP("url", "", "", "")
