@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -22,6 +23,8 @@ const tunOffset = 16
 // maxIPPacketSize is the largest packet described by the IPv6 payload-length
 // field (40-byte base header plus a 65535-byte payload).
 const maxIPPacketSize = 40 + 0xffff
+
+var errClosed = fmt.Errorf("batch writer closed")
 
 type StreamGetter func(netip.Addr) (io.Writer, bool)
 
@@ -119,15 +122,7 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 	}
 }
 
-func ClientForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadCloser) error {
-	return forwardStreamToTun(ctx, dev, stream, false)
-}
-
-func ServerForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadCloser) error {
-	return forwardStreamToTun(ctx, dev, stream, true)
-}
-
-func forwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadCloser, sharedDevice bool) error {
+func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadCloser) error {
 	mtu, err := dev.MTU()
 	if err != nil {
 		return err
@@ -142,22 +137,17 @@ func forwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadClose
 	errCh <- nil
 	go func() {
 		defer wg.Done()
-		if runErr := batch.run(dev); runErr != nil {
+		defer func() { _ = stream.Close() }()
+		if runErr := batch.run(ctx, dev); runErr != nil {
 			errs := <-errCh
 			errs = append(errs, fmt.Errorf("batch run:%w", runErr))
 			errCh <- errs
 			batch.close()
 		}
-		_ = stream.Close()
 	}()
 	go func() {
 		defer wg.Done()
 		defer batch.close()
-		defer func() {
-			if !sharedDevice {
-				_ = dev.Close()
-			}
-		}()
 		if readErr := readStream(batch, stream, mtu); readErr != nil {
 			errs := <-errCh
 			errs = append(errs, fmt.Errorf("stream read:%w", readErr))
@@ -176,7 +166,7 @@ func readStream(batch *batchWrite, stream io.Reader, mtu int) error {
 	readBuf := make([]byte, readBufSize)
 	pending := readBuf[:0]
 	var readErr error
-	buf := batch.swapBuf(nil)
+	buf, _ := batch.swapBuf(nil)
 	if buf == nil {
 		return io.ErrClosedPipe
 	}
@@ -195,7 +185,10 @@ func readStream(batch *batchWrite, stream io.Reader, mtu int) error {
 			// whole packet is available so the next packet remains aligned.
 			if n <= mtu {
 				copy(buf[tunOffset:tunOffset+n], pending[:n])
-				buf = batch.swapBuf(buf[:tunOffset+n])
+				buf, ok = batch.swapBuf(buf[:tunOffset+n])
+				if !ok {
+					return errClosed
+				}
 			}
 			pending = pending[n:]
 		}
@@ -276,8 +269,8 @@ type batchWrite struct {
 	fullCh     chan struct{}
 	bufQueue   chan []byte
 	readyQueue chan []byte
-	done       chan struct{}
-	doneOnce   sync.Once
+
+	closed uint32
 }
 
 func newBatchWrite(bufSize, batchSize int) *batchWrite {
@@ -286,7 +279,6 @@ func newBatchWrite(bufSize, batchSize int) *batchWrite {
 		fullCh:     make(chan struct{}, 1),
 		bufQueue:   make(chan []byte, batchSize),
 		readyQueue: make(chan []byte, batchSize),
-		done:       make(chan struct{}),
 	}
 	for i := 0; i < batchSize; i++ {
 		star, end := i*bufSize, (i+1)*bufSize
@@ -296,23 +288,24 @@ func newBatchWrite(bufSize, batchSize int) *batchWrite {
 }
 
 func (b *batchWrite) close() {
-	b.doneOnce.Do(func() { close(b.done) })
+	close(b.bufQueue)
+	close(b.readyQueue)
+
 }
 
-func (b *batchWrite) swapBuf(in []byte) []byte {
+func (b *batchWrite) swapBuf(in []byte) ([]byte, bool) {
 	if in != nil {
+		if atomic.LoadUint32(&b.closed) != 0 {
+			return nil, false
+		}
 		select {
 		case b.readyQueue <- in:
-		case <-b.done:
-			return nil
 		}
 	}
 
 	select {
-	case buf := <-b.bufQueue:
-		return buf
-	case <-b.done:
-		return nil
+	case buf, ok := <-b.bufQueue:
+		return buf, ok
 	default:
 	}
 
@@ -321,21 +314,20 @@ func (b *batchWrite) swapBuf(in []byte) []byte {
 	default:
 	}
 	select {
-	case buf := <-b.bufQueue:
-		return buf
-	case <-b.done:
-		return nil
+	case buf, ok := <-b.bufQueue:
+		return buf, ok
 	}
 }
 
-func (b *batchWrite) run(dev tun.Device) error {
+func (b *batchWrite) run(ctx context.Context, dev tun.Device) error {
+
 	bufs := make([][]byte, 0, len(b.bufQueue))
 	for {
 		bufs = bufs[:0]
 		select {
 		case buf := <-b.readyQueue:
 			bufs = append(bufs, buf)
-		case <-b.done:
+		case <-ctx.Done():
 			// The reader closes done after queueing its final packet. Flush any
 			// already queued packets before stopping the batch writer.
 			select {
@@ -354,7 +346,7 @@ func (b *batchWrite) run(dev tun.Device) error {
 				goto flush
 			case <-t.C:
 				goto flush
-			case <-b.done:
+			case <-ctx.Done():
 				for {
 					select {
 					case buf := <-b.readyQueue:
@@ -384,6 +376,9 @@ func (b *batchWrite) write(dev tun.Device, bufs [][]byte) error {
 	}
 	for _, buf := range bufs {
 		buf = buf[:cap(buf)]
+		if atomic.LoadUint32(&b.closed) != 0 {
+			return errClosed
+		}
 		b.bufQueue <- buf
 	}
 	return nil

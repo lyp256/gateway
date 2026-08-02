@@ -58,7 +58,7 @@ func (t *TunnelClient) Run(ctx context.Context) error {
 	}
 	go func() {
 		defer stop()
-		err := tunnel.ClientForwardStreamToTun(ctx, t.device, t.stream)
+		err := tunnel.ForwardStreamToTun(ctx, t.device, t.stream)
 		if err != nil {
 			errCh <- fmt.Errorf("client.ForwardStreamToTun:%w", err)
 			return

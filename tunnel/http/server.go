@@ -94,7 +94,7 @@ func (t *TunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 	}()
 
-	err = tunnel.ServerForwardStreamToTun(r.Context(), t.device, conn)
+	err = tunnel.ForwardStreamToTun(r.Context(), t.device, conn)
 	slog.Error("server.ForwardStreamToTun", "error", err)
 }
 
