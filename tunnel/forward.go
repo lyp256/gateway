@@ -39,26 +39,31 @@ func ServerForwardTunToStream(ctx context.Context, dev tun.Device, streamGetter 
 	return forwardTunToStream(ctx, dev, streamGetter, true)
 }
 
-func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter StreamGetter, ignoreIOErr bool) error {
-	mtu, err := dev.MTU()
-	if err != nil {
-		return err
-	}
+func newReadBuffers(mtu int, batchSize int) [][]byte {
 	bufSize := mtu + tunOffset
-	batchSize := dev.BatchSize()
 	bufs := make([][]byte, batchSize)
-	sizes := make([]int, batchSize)
 	buf := make([]byte, batchSize*bufSize)
 	for i := range bufs {
 		star, end := i*bufSize, (i+1)*bufSize
 		bufs[i] = buf[star:end:end]
 	}
+	return bufs
+}
 
+func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter StreamGetter, ignoreIOErr bool) error {
+	mtu, err := dev.MTU()
+	if err != nil {
+		return err
+	}
+	batchSize := dev.BatchSize()
+	sizes := make([]int, batchSize)
+	bufs := newReadBuffers(mtu, batchSize)
 	bufPool := NewPool(func() *bytes.Buffer {
 		b := bytes.NewBuffer(make([]byte, mtu))
 		b.Reset()
 		return b
 	})
+	eventCh := dev.Events()
 
 	for {
 		select {
@@ -119,6 +124,26 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 				}
 			}
 		}
+	eventLoop:
+		for {
+			select {
+			case event := <-eventCh:
+				if event == tun.EventMTUUpdate {
+					newMtu, err := dev.MTU()
+					if err != nil {
+						slog.Error("get new MTU failed", "err", err)
+					}
+					if newMtu != mtu {
+						bufs = newReadBuffers(mtu, batchSize)
+						mtu = newMtu
+					}
+				}
+			default:
+				break eventLoop
+			}
+
+		}
+
 	}
 }
 
@@ -362,6 +387,13 @@ func (b *batchWrite) run(ctx context.Context, dev tun.Device) error {
 		if err != nil {
 			return err
 		}
+		for _, buf := range bufs {
+			buf = buf[:cap(buf)]
+			if atomic.LoadUint32(&b.closed) != 0 {
+				return errClosed
+			}
+			b.bufQueue <- buf
+		}
 	}
 
 }
@@ -373,13 +405,6 @@ func (b *batchWrite) write(dev tun.Device, bufs [][]byte) error {
 	_, err := dev.Write(bufs, tunOffset)
 	if err != nil {
 		return fmt.Errorf("batch write:%w", err)
-	}
-	for _, buf := range bufs {
-		buf = buf[:cap(buf)]
-		if atomic.LoadUint32(&b.closed) != 0 {
-			return errClosed
-		}
-		b.bufQueue <- buf
 	}
 	return nil
 }
