@@ -39,26 +39,52 @@ func ServerForwardTunToStream(ctx context.Context, dev tun.Device, streamGetter 
 	return forwardTunToStream(ctx, dev, streamGetter, true)
 }
 
-func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter StreamGetter, ignoreIOErr bool) error {
-	mtu, err := dev.MTU()
-	if err != nil {
-		return err
-	}
+func newReadBuffers(mtu int, batchSize int) [][]byte {
 	bufSize := mtu + tunOffset
-	batchSize := dev.BatchSize()
 	bufs := make([][]byte, batchSize)
-	sizes := make([]int, batchSize)
 	buf := make([]byte, batchSize*bufSize)
 	for i := range bufs {
 		star, end := i*bufSize, (i+1)*bufSize
 		bufs[i] = buf[star:end:end]
 	}
+	return bufs
+}
 
+func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter StreamGetter, ignoreIOErr bool) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	currentMTU, err := dev.MTU()
+	if err != nil {
+		return err
+	}
+	devMTU := uint32(currentMTU)
+	batchSize := dev.BatchSize()
+	sizes := make([]int, batchSize)
+	bufs := newReadBuffers(currentMTU, batchSize)
 	bufPool := NewPool(func() *bytes.Buffer {
-		b := bytes.NewBuffer(make([]byte, mtu))
+		b := bytes.NewBuffer(make([]byte, currentMTU))
 		b.Reset()
 		return b
 	})
+
+	go func() {
+		eventCh := dev.Events()
+		for {
+			select {
+			case event := <-eventCh:
+				if event == tun.EventMTUUpdate {
+					newMtu, err := dev.MTU()
+					if err != nil {
+						slog.Error("get new MTU failed", "err", err)
+					}
+					atomic.StoreUint32(&devMTU, uint32(newMtu))
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -119,6 +145,12 @@ func forwardTunToStream(ctx context.Context, dev tun.Device, streamGetter Stream
 				}
 			}
 		}
+		newMTU := int(atomic.LoadUint32(&devMTU))
+		if newMTU != currentMTU {
+			currentMTU = newMTU
+			bufs = newReadBuffers(currentMTU, batchSize)
+		}
+
 	}
 }
 
@@ -127,9 +159,34 @@ func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadClose
 	if err != nil {
 		return err
 	}
-	bufSize := mtu + tunOffset
 	batchSize := dev.BatchSize()
-	batch := newBatchWrite(bufSize, batchSize)
+	batch := newBatchWrite(mtu+tunOffset, batchSize)
+	var currentMTU atomic.Int64
+	currentMTU.Store(int64(mtu))
+
+	eventCtx, cancelEvents := context.WithCancel(ctx)
+	defer cancelEvents()
+	go func() {
+		for {
+			select {
+			case <-eventCtx.Done():
+				return
+			case event, ok := <-dev.Events():
+				if !ok {
+					return
+				}
+				if event != tun.EventMTUUpdate {
+					continue
+				}
+				newMTU, err := dev.MTU()
+				if err != nil {
+					slog.Error("ForwardStreamToTun: get new MTU failed", "err", err)
+					continue
+				}
+				currentMTU.Store(int64(newMTU))
+			}
+		}
+	}()
 
 	wg := sync.WaitGroup{}
 	wg.Add(2)
@@ -148,7 +205,9 @@ func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadClose
 	go func() {
 		defer wg.Done()
 		defer batch.close()
-		if readErr := readStream(batch, stream, mtu); readErr != nil {
+		if readErr := readStreamWithMTU(batch, stream, func() int {
+			return int(currentMTU.Load())
+		}); readErr != nil {
 			errs := <-errCh
 			errs = append(errs, fmt.Errorf("stream read:%w", readErr))
 			errCh <- errs
@@ -159,14 +218,18 @@ func ForwardStreamToTun(ctx context.Context, dev tun.Device, stream io.ReadClose
 }
 
 func readStream(batch *batchWrite, stream io.Reader, mtu int) error {
-	readBufSize := cap(batch.bufQueue) * (mtu + tunOffset)
+	return readStreamWithMTU(batch, stream, func() int { return mtu })
+}
+
+func readStreamWithMTU(batch *batchWrite, stream io.Reader, mtu func() int) error {
+	readBufSize := cap(batch.bufQueue) * (mtu() + tunOffset)
 	if readBufSize < maxIPPacketSize {
 		readBufSize = maxIPPacketSize
 	}
 	readBuf := make([]byte, readBufSize)
 	pending := readBuf[:0]
 	var readErr error
-	buf, _ := batch.swapBuf(nil)
+	buf, _ := batch.swapBufSize(nil, tunOffset+mtu())
 	if buf == nil {
 		return io.ErrClosedPipe
 	}
@@ -183,9 +246,9 @@ func readStream(batch *batchWrite, stream io.Reader, mtu int) error {
 
 			// Drop packets that cannot be accepted by this TUN, but only after the
 			// whole packet is available so the next packet remains aligned.
-			if n <= mtu {
+			if n <= mtu() {
 				copy(buf[tunOffset:tunOffset+n], pending[:n])
-				buf, ok = batch.swapBuf(buf[:tunOffset+n])
+				buf, ok = batch.swapBufSize(buf[:tunOffset+n], tunOffset+n)
 				if !ok {
 					return errClosed
 				}
@@ -319,6 +382,19 @@ func (b *batchWrite) swapBuf(in []byte) ([]byte, bool) {
 	}
 }
 
+// swapBufSize is swapBuf with a minimum capacity requirement. It allows the
+// batch to grow when the device MTU increases without replacing its queues.
+func (b *batchWrite) swapBufSize(in []byte, size int) ([]byte, bool) {
+	buf, ok := b.swapBuf(in)
+	if !ok {
+		return nil, false
+	}
+	if cap(buf) < size {
+		buf = make([]byte, size)
+	}
+	return buf, true
+}
+
 func (b *batchWrite) run(ctx context.Context, dev tun.Device) error {
 
 	bufs := make([][]byte, 0, len(b.bufQueue))
@@ -362,6 +438,13 @@ func (b *batchWrite) run(ctx context.Context, dev tun.Device) error {
 		if err != nil {
 			return err
 		}
+		for _, buf := range bufs {
+			buf = buf[:cap(buf)]
+			if atomic.LoadUint32(&b.closed) != 0 {
+				return errClosed
+			}
+			b.bufQueue <- buf
+		}
 	}
 
 }
@@ -373,13 +456,6 @@ func (b *batchWrite) write(dev tun.Device, bufs [][]byte) error {
 	_, err := dev.Write(bufs, tunOffset)
 	if err != nil {
 		return fmt.Errorf("batch write:%w", err)
-	}
-	for _, buf := range bufs {
-		buf = buf[:cap(buf)]
-		if atomic.LoadUint32(&b.closed) != 0 {
-			return errClosed
-		}
-		b.bufQueue <- buf
 	}
 	return nil
 }
