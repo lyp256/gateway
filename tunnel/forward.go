@@ -351,6 +351,9 @@ func newBatchWrite(bufSize, batchSize int) *batchWrite {
 }
 
 func (b *batchWrite) close() {
+	if atomic.SwapUint32(&b.closed, 1) == 1 {
+		return
+	}
 	close(b.bufQueue)
 	close(b.readyQueue)
 

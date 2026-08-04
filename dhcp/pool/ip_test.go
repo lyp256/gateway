@@ -83,7 +83,7 @@ func TestDHCPPoolAllocateSpecificIP(t *testing.T) {
 		t.Fatalf("IsAllocated(%q) = true, want false", ip)
 	}
 
-	if err := pool.AllocateIP(ip); err != nil {
+	if _, err := pool.AllocateIP(ip); err != nil {
 		t.Fatalf("AllocateIP(%q) error = %v", ip, err)
 	}
 	allocated, err = pool.IsAllocated(ip)
@@ -94,7 +94,7 @@ func TestDHCPPoolAllocateSpecificIP(t *testing.T) {
 		t.Fatalf("IsAllocated(%q) = false, want true", ip)
 	}
 
-	if err := pool.AllocateIP(ip); !errors.Is(err, ErrIPAlreadyAllocated) {
+	if _, err := pool.AllocateIP(ip); !errors.Is(err, ErrIPAlreadyAllocated) {
 		t.Fatalf("AllocateIP(%q) duplicate error = %v, want %v", ip, err, ErrIPAlreadyAllocated)
 	}
 
@@ -120,7 +120,7 @@ func TestDHCPPoolSpecificIPValidation(t *testing.T) {
 		if _, err := pool.IsAllocated(ip); !errors.Is(err, ErrInvalidIP) {
 			t.Fatalf("IsAllocated(%q) error = %v, want %v", ip, err, ErrInvalidIP)
 		}
-		if err := pool.AllocateIP(ip); !errors.Is(err, ErrInvalidIP) {
+		if _, err := pool.AllocateIP(ip); !errors.Is(err, ErrInvalidIP) {
 			t.Fatalf("AllocateIP(%q) error = %v, want %v", ip, err, ErrInvalidIP)
 		}
 	}
@@ -129,7 +129,7 @@ func TestDHCPPoolSpecificIPValidation(t *testing.T) {
 	if _, err := pool.IsAllocated(ip); !errors.Is(err, ErrIPOutOfRange) {
 		t.Fatalf("IsAllocated(%q) error = %v, want %v", ip, err, ErrIPOutOfRange)
 	}
-	if err := pool.AllocateIP(ip); !errors.Is(err, ErrIPOutOfRange) {
+	if _, err := pool.AllocateIP(ip); !errors.Is(err, ErrIPOutOfRange) {
 		t.Fatalf("AllocateIP(%q) error = %v, want %v", ip, err, ErrIPOutOfRange)
 	}
 }

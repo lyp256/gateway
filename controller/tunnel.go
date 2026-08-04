@@ -21,7 +21,7 @@ func (ctl *controller) dialTunnel(ctx context.Context, t dao.Tunnel) {
 	tun := tunIF{
 		cancel: cancel,
 	}
-	cli, err := http.NewClient(ctx, "POST", t.Url, nil, t.Name, 1350)
+	cli, err := http.NewClient("POST", t.Url, nil, t.Name, 1350)
 	if err != nil {
 		tun.lastErr = err
 	} else {

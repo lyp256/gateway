@@ -16,23 +16,12 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
-func CreateTUNDevice(name string, mtu uint16, addr netip.Prefix) (tun.Device, error) {
+func CreateTUNDevice(name string, mtu uint16) (tun.Device, error) {
 	dev, err := tun.CreateTUN(name, int(mtu))
 	if err != nil {
 		return nil, err
 	}
 	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return nil, err
-	}
-
-	ip := addr.Addr().As4()
-	ipnet := net.IPNet{
-		IP:   ip[:],
-		Mask: net.CIDRMask(addr.Bits(), len(ip)*8),
-	}
-
-	err = netlink.AddrAdd(link, &netlink.Addr{IPNet: &ipnet})
 	if err != nil {
 		return nil, err
 	}
@@ -43,6 +32,40 @@ func CreateTUNDevice(name string, mtu uint16, addr netip.Prefix) (tun.Device, er
 	return dev, nil
 }
 
+func SetAddr(name string, addr netip.Prefix, overwrite bool) error {
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return err
+	}
+	ip := addr.Addr().As4()
+	ipnet := net.IPNet{
+		IP:   ip[:],
+		Mask: net.CIDRMask(addr.Bits(), len(ip)*8),
+	}
+
+	addrs, err := netlink.AddrList(link, netlink.FAMILY_V4)
+	if err != nil {
+		return err
+	}
+	var exist bool
+	for _, addr := range addrs {
+		if addr.IPNet.Mask.String() == ipnet.String() {
+			exist = true
+			continue
+		}
+		if overwrite {
+			err = netlink.AddrDel(link, &addr)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if exist {
+		return netlink.AddrAdd(link, &netlink.Addr{IPNet: &ipnet})
+	}
+	return nil
+}
+
 // DeleteTUNDevice removes the network interface named name.
 func DeleteTUNDevice(name string) error {
 	link, err := netlink.LinkByName(name)
@@ -50,6 +73,7 @@ func DeleteTUNDevice(name string) error {
 		return err
 	}
 	return netlink.LinkDel(link)
+
 }
 
 func CreateRuleRoute(fwmark uint32, tableID uint32, dev string) error {

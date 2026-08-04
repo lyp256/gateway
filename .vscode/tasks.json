@@ -30,11 +30,8 @@
         {
             "label": "run-tunnel-client-debug",
             "type": "process",
-            "command": "make",
+            "command": "${workspaceFolder}/scripts/tunnel-client-debug.sh",
             "isBackground": true,
-            "args": [
-                "run-tunnel-client-debug"
-            ],
             "dependsOn": [
                 "build-debug"
             ],
@@ -48,9 +45,15 @@
                 "background": {
                     "activeOnStart": true,
                     "beginsPattern": ".*",
-                    "endsPattern": "API server listening at:.*"
+                    "endsPattern": "API server.*"
                 }
             }
+        },
+        {
+            "label": "kill-tunnel-client-debug",
+            "type": "process",
+            "command": "${workspaceFolder}/scripts/tunnel-client-debug-clean.sh",
+            "problemMatcher": []
         }
     ]
 }

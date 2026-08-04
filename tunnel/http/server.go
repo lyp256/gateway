@@ -16,6 +16,10 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 )
 
+const (
+	IPAddress = "ip"
+)
+
 func NewServer(mtu uint16, devName string, cidr netip.Prefix) (*TunnelServer, error) {
 	if mtu == 0 {
 		mtu = 1500
@@ -32,9 +36,13 @@ func NewServer(mtu uint16, devName string, cidr netip.Prefix) (*TunnelServer, er
 	if err != nil {
 		return nil, err
 	}
-	device, err := tunnel.CreateTUNDevice(devName, mtu, addr)
+	device, err := tunnel.CreateTUNDevice(devName, mtu)
 	if err != nil {
 		return nil, fmt.Errorf("CreateTUNDevice: %w", err)
+	}
+	err = tunnel.SetAddr(devName, addr, true)
+	if err != nil {
+		return nil, fmt.Errorf("SetAddr: %w", err)
 	}
 	h32 := fnv.New32a()
 	_, _ = h32.Write([]byte(devName))
@@ -69,14 +77,28 @@ type TunnelServer struct {
 
 func (t *TunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var res HandshakeRespone
-	addr, err := t.ippool.Allocate()
-	if err != nil {
-		res.SetStatus(StatusNoIP)
+	var addr netip.Prefix
+	var err error
+	if reqIP := r.URL.Query().Get(IPAddress); reqIP != "" {
+		ipAddr, err := netip.ParseAddr(r.URL.Query().Get(IPAddress))
+		if err != nil {
+			res.SetStatus(StatusInvalidParams)
+
+		}
+		addr, err = t.ippool.AllocateIP(ipAddr)
+		if err != nil {
+			res.SetStatus(StatusNoIP)
+		}
+
 	} else {
-		defer t.ippool.Release(addr.Addr())
+		addr, err = t.ippool.Allocate()
+		if err != nil {
+			res.SetStatus(StatusNoIP)
+		} else {
+			defer t.ippool.Release(addr.Addr())
+		}
 	}
 	res.SetIP(addr)
-
 	conn, err := HTTPServerHandshake(w, r, res)
 	if err != nil {
 		return

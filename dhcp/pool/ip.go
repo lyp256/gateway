@@ -130,10 +130,10 @@ func (p *DHCPPool) IsAllocated(ip netip.Addr) (bool, error) {
 }
 
 // AllocateIP allocates the specified available IP address from this pool.
-func (p *DHCPPool) AllocateIP(ip netip.Addr) error {
+func (p *DHCPPool) AllocateIP(ip netip.Addr) (netip.Prefix, error) {
 	bucketIndex, bitIndex, err := p.ipPosition(ip)
 	if err != nil {
-		return err
+		return netip.Prefix{}, err
 	}
 
 	p.mu.Lock()
@@ -141,11 +141,11 @@ func (p *DHCPPool) AllocateIP(ip netip.Addr) error {
 
 	mask := uint64(1) << bitIndex
 	if p.bitmap[bucketIndex]&mask != 0 {
-		return ErrIPAlreadyAllocated
+		return netip.Prefix{}, ErrIPAlreadyAllocated
 	}
 
 	p.bitmap[bucketIndex] |= mask
-	return nil
+	return netip.PrefixFrom(ip, p.maskbits), nil
 }
 
 func (p *DHCPPool) ipPosition(ip netip.Addr) (bucketIndex, bitIndex int, err error) {
