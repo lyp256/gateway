@@ -35,7 +35,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	client, err := tunnelHttp.NewClient(ctx, *method, *u, header, *devName, 1350)
+	client, err := tunnelHttp.NewClient(*method, *u, header, *devName, 1350)
 	if err != nil {
 		slog.Error("create tunnel client", "error", err)
 		os.Exit(1)

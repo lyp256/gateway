@@ -11,6 +11,7 @@
             "host": "198.19.20.22",
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "run-tunnel-client-debug",
+            "postDebugTask": "kill-tunnel-client-debug"
         },
         {
             "name": "gateway",
@@ -21,7 +22,7 @@
             "console": "integratedTerminal",
             "program": "${workspaceFolder}/bin/gateway",
             "cwd": "${workspaceFolder}/bin",
-            "preLaunchTask": "build-debug",
+            "preLaunchTask": "build-debug"
         },
         {
             "name": "tunnel-server",
@@ -35,7 +36,7 @@
             "console": "integratedTerminal",
             "program": "${workspaceFolder}/bin/tunnel-server",
             "cwd": "${workspaceFolder}/bin",
-            "preLaunchTask": "build-debug",
+            "preLaunchTask": "build-debug"
         }
     ]
 }
