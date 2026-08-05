@@ -37,16 +37,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	tunnelServer, err := tunnelHttp.NewServer(*mtu, *devName, cidr, func(r *http.Request) error {
-		if *apiKey == "" {
-			return nil
-		}
-		if tunnelHttp.GetAPIKey(r) != *apiKey {
-			return fmt.Errorf("Unauthorized")
-		}
-		return nil
-
-	})
+	tunnelServer, err := tunnelHttp.NewServer(*mtu, *devName, cidr, tunnelHttp.NewKeyAuth(*apiKey))
 	if err != nil {
 		slog.Error("create tunnel server", "error", err)
 		os.Exit(1)

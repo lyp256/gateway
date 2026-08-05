@@ -1,6 +1,9 @@
 package http
 
-import "net/http"
+import (
+	"fmt"
+	"net/http"
+)
 
 const (
 	APIKEY = "api-key"
@@ -21,4 +24,16 @@ func GetAPIKey(req *http.Request) string {
 		return ck.Value
 	}
 	return ""
+}
+
+func NewKeyAuth(key string) AuthenticationFunc {
+	if key == "" {
+		return nil
+	}
+	return func(r *http.Request) error {
+		if GetAPIKey(r) != key {
+			return fmt.Errorf("Unauthorized")
+		}
+		return nil
+	}
 }

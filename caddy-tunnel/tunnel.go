@@ -39,6 +39,8 @@ type tunnelModule struct {
 	MTU uint16 `json:"mtu,omitempty"`
 	// CIDR is the IPv4 network from which tunnel client addresses are allocated.
 	CIDR string `json:"cidr,omitempty"`
+	// auth KEY
+	KEY string `json:"key,omitempty"`
 
 	server    *tunnelHTTP.TunnelServer
 	logger    *zap.Logger
@@ -63,7 +65,7 @@ func (m *tunnelModule) Provision(ctx caddy.Context) error {
 
 	m.logger = ctx.Logger(m)
 	cidr, _ := netip.ParsePrefix(m.CIDR) // validated above
-	server, err := tunnelHTTP.NewServer(m.MTU, m.Device, cidr)
+	server, err := tunnelHTTP.NewServer(m.MTU, m.Device, cidr, tunnelHTTP.NewKeyAuth(m.KEY))
 	if err != nil {
 		return fmt.Errorf("create tunnel server: %w", err)
 	}
@@ -123,6 +125,10 @@ func (m *tunnelModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			switch d.Val() {
 			case "device_name":
 				if !d.AllArgs(&m.Device) {
+					return d.ArgErr()
+				}
+			case "key":
+				if !d.AllArgs(&m.KEY) {
 					return d.ArgErr()
 				}
 			case "mtu":
