@@ -2,7 +2,6 @@ package tunnel
 
 import "sync"
 
-
 type Pool[T any] struct {
 	pool sync.Pool
 }

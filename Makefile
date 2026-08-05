@@ -1,4 +1,4 @@
-.PHONY: generate build build-debug run-tunnel-client-debug clean-tunnel-client-debug
+.PHONY: generate build build-debug
 
 DLVBINARY=$(shell which dlv)
 
@@ -45,8 +45,3 @@ clear-testns:
 
 run-tunnel-client-debug:
 	sudo ip netns exec ${TESTNS} env DEBUG_ADDR=":12080" $(DLVBINARY) exec ./bin/tunnel-client --headless --listen=:2345 --api-version=2  -- --url=${TUNNELSERVER}
-
-clean-tunnel-client-debug:
-	sudo pkill -KILL -f 'bin/tunnel[-]client --url=' || true
-	sudo pkill -KILL -f 'dlv exec ./bin/tunnel[-]client' || true
-	sudo pkill -KILL -f 'ip netns exec test env DEBUG_ADDR=:12080' || true

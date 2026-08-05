@@ -18,8 +18,9 @@ import (
 
 const (
 	StatusOK byte = iota
-	StatusNoIP
 	StatusInvalidParams
+	StatusUnauthorized
+	StatusNoIP
 )
 
 var ErrInvalidCRC32Sum = errors.New("invalid crc32 sum")

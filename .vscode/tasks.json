@@ -31,10 +31,10 @@
             "label": "run-tunnel-client-debug",
             "type": "process",
             "command": "make",
+            "isBackground": true,
             "args": [
                 "run-tunnel-client-debug"
             ],
-            "isBackground": true,
             "dependsOn": [
                 "build-debug"
             ],
@@ -47,19 +47,10 @@
                 "base": "$go",
                 "background": {
                     "activeOnStart": true,
-                    "beginsPattern": "API server listening.*",
-                    "endsPattern": "API server listening.*"
+                    "beginsPattern": ".*",
+                    "endsPattern": "API server listening at:.*"
                 }
             }
-        },
-        {
-            "label": "kill-tunnel-client-debug",
-            "type": "process",
-            "command": "make",
-            "args": [
-                "clean-tunnel-client-debug"
-            ],
-            "problemMatcher": []
         }
     ]
 }

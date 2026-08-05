@@ -26,6 +26,7 @@ func main() {
 	mtu := pflag.Uint16P("mtu", "", 1500, "tunnel device mtu")
 	port := pflag.Uint16P("port", "", 80, "tunnel server http port")
 	devName := pflag.StringP("device-name", "n", "tunnel-server", "tunnel device name")
+	apiKey := pflag.StringP("api-key", "", "", "tunnel aauthentication device name")
 	cidrNet := pflag.IPNetP("cidr", "", net.IPNet{
 		IP:   net.IPv4(198, 18, 18, 0),
 		Mask: net.CIDRMask(24, 32),
@@ -36,7 +37,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	tunnelServer, err := tunnelHttp.NewServer(*mtu, *devName, cidr)
+	tunnelServer, err := tunnelHttp.NewServer(*mtu, *devName, cidr, func(r *http.Request) error {
+		if *apiKey == "" {
+			return nil
+		}
+		if tunnelHttp.GetAPIKey(r) != *apiKey {
+			return fmt.Errorf("Unauthorized")
+		}
+		return nil
+
+	})
 	if err != nil {
 		slog.Error("create tunnel server", "error", err)
 		os.Exit(1)

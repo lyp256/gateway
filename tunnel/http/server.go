@@ -20,7 +20,7 @@ const (
 	IPAddress = "ip"
 )
 
-func NewServer(mtu uint16, devName string, cidr netip.Prefix) (*TunnelServer, error) {
+func NewServer(mtu uint16, devName string, cidr netip.Prefix, auth AuthenticationFunc) (*TunnelServer, error) {
 	if mtu == 0 {
 		mtu = 1500
 	}
@@ -63,22 +63,33 @@ func NewServer(mtu uint16, devName string, cidr netip.Prefix) (*TunnelServer, er
 }
 
 type TunnelServer struct {
-	mtu        int
-	ippool     *pool.DHCPPool
-	deviceName string
-	device     tun.Device
-	deviceAddr netip.Prefix
-	tableID    uint32
-	fwmark     uint32
-	peerMux    sync.RWMutex
-	peer       map[netip.Addr]io.ReadWriteCloser
-	cancel     context.CancelFunc
+	authentication AuthenticationFunc
+	mtu            int
+	ippool         *pool.DHCPPool
+	deviceName     string
+	device         tun.Device
+	deviceAddr     netip.Prefix
+	tableID        uint32
+	fwmark         uint32
+	peerMux        sync.RWMutex
+	peer           map[netip.Addr]io.ReadWriteCloser
+	cancel         context.CancelFunc
 }
 
 func (t *TunnelServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var res HandshakeRespone
 	var addr netip.Prefix
 	var err error
+	if t.authentication != nil {
+		err = t.authentication(r)
+		if err != nil {
+			res.SetStatus(StatusUnauthorized)
+			HTTPServerHandshake(w, r, res)
+			return
+		}
+
+	}
+
 	if reqIP := r.URL.Query().Get(IPAddress); reqIP != "" {
 		ipAddr, err := netip.ParseAddr(r.URL.Query().Get(IPAddress))
 		if err != nil {

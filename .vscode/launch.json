@@ -11,7 +11,6 @@
             "host": "198.19.20.22",
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "run-tunnel-client-debug",
-            "postDebugTask": "kill-tunnel-client-debug"
         },
         {
             "name": "gateway",
