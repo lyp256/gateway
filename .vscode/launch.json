@@ -2,6 +2,16 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "attach-2345",
+            "type": "go",
+            "request": "attach",
+            "mode": "remote",
+            "remotePath": "${workspaceFolder}",
+            "port": 2345,
+            "host": "127.0.0.1",
+            "cwd": "${workspaceFolder}",
+        },
+        {
             "name": "tunnel-client",
             "type": "go",
             "request": "attach",

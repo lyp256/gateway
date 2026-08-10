@@ -77,7 +77,17 @@ func DialHTTPRawTunnel(ctx context.Context, method string, url string, header ht
 	if err != nil {
 		return nil, nil, fmt.Errorf("http.NewRequest:%w", err)
 	}
-	conn, err := net.Dial("tcp", serverAddr(request.URL))
+	addr := serverAddr(request.URL)
+	var conn net.Conn
+	switch request.URL.Scheme {
+	case "http":
+		conn, err = net.Dial("tcp", addr)
+	case "https":
+		conn, err = tls.Dial("tcp", addr, nil)
+	default:
+		return nil, nil, fmt.Errorf("unsupport scheme '%s'", request.URL.Scheme)
+	}
+
 	if err != nil {
 		return nil, nil, fmt.Errorf("net.Dial:%w", err)
 	}
