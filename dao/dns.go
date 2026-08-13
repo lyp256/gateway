@@ -9,8 +9,8 @@ import (
 )
 
 type Host struct {
-	Name string
-	IP   netip.Addr
+	Name string     `json:"name"`
+	IP   netip.Addr `json:"ip"`
 }
 
 // marshalHostKey 组装存储 key：PrefixHosts + host。

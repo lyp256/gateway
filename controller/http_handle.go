@@ -100,41 +100,67 @@ func (ctl *controller) deleteHosts(ctx context.Context, in *struct {
 	return nil, nil
 }
 
-func (ctl *controller) getTunnels(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.Tunnel], error) {
-	list, err := ctl.storage.ListTunnel()
+func (ctl *controller) getEgresses(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.Egress], error) {
+	list, err := ctl.storage.ListEgress()
 	if err != nil {
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
 	return schema.NewBody(list), nil
 }
 
-func (ctl *controller) getTunnel(ctx context.Context, in *struct {
+func (ctl *controller) getEgress(ctx context.Context, in *struct {
 	Name string `path:"name"`
-}) (*schema.Body[dao.Tunnel], error) {
-	tun, err := ctl.storage.GetTunnel(in.Name)
+}) (*schema.Body[dao.Egress], error) {
+	tun, err := ctl.storage.GetEgress(in.Name)
 	if err != nil {
 		if errors.Is(err, dao.ErrKeyNotFound) {
-			return nil, huma.NewError(http.StatusNotFound, "tunnel not found")
+			return nil, huma.NewError(http.StatusNotFound, "egress not found")
 		}
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
 	return schema.NewBody(tun), nil
 }
 
-func (ctl *controller) setTunnel(ctx context.Context, in *schema.Body[dao.Tunnel]) (*schema.Body[dao.Tunnel], error) {
+func (ctl *controller) createEgress(ctx context.Context, in *schema.Body[dao.Egress]) (*schema.Body[dao.Egress], error) {
 	if in.Body.Name == "" {
-		return nil, huma.NewError(http.StatusBadRequest, "tunnel name is required")
+		return nil, huma.NewError(http.StatusBadRequest, "egress name is required")
 	}
-	if err := ctl.storage.SetTunnel(in.Body); err != nil {
-		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	if err := ctl.storage.CreateEgress(in.Body); err != nil {
+		return nil, egressError(err)
 	}
 	return schema.NewBody(in.Body), nil
 }
 
-func (ctl *controller) deleteTunnel(ctx context.Context, in *struct {
+func (ctl *controller) updateEgress(ctx context.Context, in *struct {
+	Name string `path:"name"`
+	Body dao.Egress
+}) (*schema.Body[dao.Egress], error) {
+	if in.Body.Name != in.Name {
+		return nil, huma.NewError(http.StatusBadRequest, "egress name cannot be changed")
+	}
+	if err := ctl.storage.UpdateEgress(in.Body); err != nil {
+		return nil, egressError(err)
+	}
+	return schema.NewBody(in.Body), nil
+}
+
+func egressError(err error) error {
+	switch {
+	case errors.Is(err, dao.ErrEgressNameExists):
+		return huma.Error409Conflict("egress name already exists")
+	case errors.Is(err, dao.ErrEgressFwMarkExists):
+		return huma.Error409Conflict("egress fwmark already exists")
+	case errors.Is(err, dao.ErrKeyNotFound):
+		return huma.Error404NotFound("egress not found")
+	default:
+		return huma.NewError(http.StatusInternalServerError, "", err)
+	}
+}
+
+func (ctl *controller) deleteEgress(ctx context.Context, in *struct {
 	Name string `path:"name"`
 }) (*struct{}, error) {
-	if err := ctl.storage.DeleteTunnel(in.Name); err != nil {
+	if err := ctl.storage.DeleteEgress(in.Name); err != nil {
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
 	return nil, nil

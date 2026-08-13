@@ -13,7 +13,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/lyp256/gateway/bpf"
 	"github.com/lyp256/gateway/dao"
-	tunnelhttp "github.com/lyp256/gateway/tunnel/http"
 
 	"github.com/lyp256/gateway/dns/query"
 	"github.com/lyp256/gateway/dns/router"
@@ -23,7 +22,7 @@ type Controller interface {
 	dns.Handler
 	http.Handler
 	Run(ctx context.Context) error
-	WaitRead(ctx context.Context) error
+	WaitReady(ctx context.Context) error
 }
 
 func NewController(storage *dao.Dao, dnsServers []query.DNSQuerier, e chi.Router) Controller {
@@ -76,34 +75,14 @@ type controller struct {
 	// metrics
 	metricsSet *metrics.Set
 
-	tunifMux sync.RWMutex
-	tunifs   map[string]*tunIF
-
 	waitReadCh chan struct{}
 	ready      bool
-}
-
-type tunIF struct {
-	cancel  context.CancelFunc
-	client  tunnelhttp.TunnelClient
-	tun     dao.Tunnel
-	ready   bool
-	lastErr error
-}
-
-type dnsEvent struct {
-	name string
-	ip   netip.Addr
 }
 
 func (ctl *controller) Run(ctx context.Context) error {
 	ctl.ctx, ctl.cancel = context.WithCancel(ctx)
 	defer ctl.cancel()
 	err := loadHostsFromStorage(ctl.storage, ctl.hosts)
-	if err != nil {
-		return err
-	}
-	err = ctl.loadTunnelsFromStorage(ctl.ctx, ctl.storage)
 	if err != nil {
 		return err
 	}
@@ -128,7 +107,7 @@ func (ctl *controller) Run(ctx context.Context) error {
 	}
 }
 
-func (ctl *controller) WaitRead(ctx context.Context) error {
+func (ctl *controller) WaitReady(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

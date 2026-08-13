@@ -13,9 +13,11 @@ func (ctl *controller) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ctl *controller) registerHttpAPI() {
+	ctl.registerWebUI()
 	ctl.http.Get("/metrics", ctl.metrics)
 
-	// api
+	// api doc
+	// todo: 使用全局版本管理
 	hapi := humachi.New(ctl.http, huma.DefaultConfig("gateway API", "1.0.0"))
 	// 路由表相关
 	huma.Get(hapi, apiV1("/routetree"), ctl.getRouteTableTree)
@@ -28,11 +30,15 @@ func (ctl *controller) registerHttpAPI() {
 	huma.Get(hapi, apiV1("/hosts"), ctl.getHosts)
 	huma.Put(hapi, apiV1("/hosts"), ctl.setHosts)
 	huma.Delete(hapi, apiV1("/hosts/{host}"), ctl.deleteHosts)
-	// tunnel 配置
-	huma.Get(hapi, apiV1("/tunnels"), ctl.getTunnels)
-	huma.Get(hapi, apiV1("/tunnels/{name}"), ctl.getTunnel)
-	huma.Put(hapi, apiV1("/tunnels"), ctl.setTunnel)
-	huma.Delete(hapi, apiV1("/tunnels/{name}"), ctl.deleteTunnel)
+	// egress 配置
+	huma.Get(hapi, apiV1("/egresses"), ctl.getEgresses)
+	huma.Get(hapi, apiV1("/egresses/{name}"), ctl.getEgress)
+	huma.Post(hapi, apiV1("/egresses"), ctl.createEgress)
+	// Retain the previous endpoint for clients creating an egress. Existing
+	// names now return a conflict instead of being overwritten.
+	huma.Put(hapi, apiV1("/egresses"), ctl.createEgress)
+	huma.Put(hapi, apiV1("/egresses/{name}"), ctl.updateEgress)
+	huma.Delete(hapi, apiV1("/egresses/{name}"), ctl.deleteEgress)
 }
 
 func apiV1(r string) string {

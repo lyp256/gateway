@@ -128,7 +128,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.c.WaitRead(ctx); err != nil {
+	if err := s.c.WaitReady(ctx); err != nil {
 		return errors.Join(<-errsCh...)
 	}
 

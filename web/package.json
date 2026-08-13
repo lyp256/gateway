@@ -1,0 +1,16 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-vue-next": "^0.577.0",
+    "vue": "^3.5.41"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
+  }
+}

@@ -18,7 +18,10 @@ generate:
 build-debug: BUILDFLAG="-gcflags=all=-N -l"
 build-debug: build
 
-build: generate
+build-web:
+	cd web && npm run build
+
+build: generate build-web
 	go build ${BUILDFLAG} -o bin/gateway ./cmd/gateway
 	go build ${BUILDFLAG} -o bin/tunnel-server ./cmd/tunnel-server
 	go build ${BUILDFLAG} -o bin/tunnel-client ./cmd/tunnel-client
