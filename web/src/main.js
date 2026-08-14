@@ -359,7 +359,6 @@ const App = {
           </div>
         </header>
 
-        <div v-if="error" class="alert alert-error"><AlertCircle :size="18" /><span>{{ error }}</span><button title="关闭提示" @click="error = ''"><X :size="17" /></button></div>
         <div v-if="notice" class="alert alert-success"><Check :size="18" /><span>{{ notice }}</span><button title="关闭提示" @click="notice = ''"><X :size="17" /></button></div>
 
         <div v-if="loading && !lastUpdated" class="loading-state"><LoaderCircle :size="24" class="spinning" /><span>正在读取 Gateway 配置</span></div>
@@ -438,6 +437,17 @@ const App = {
           <div v-else class="form-fields"><label><span>主机名</span><input v-model="hostForm.name" :disabled="!!editing" required placeholder="internal.example.com" /></label><label><span>IP 地址</span><input v-model="hostForm.ip" required placeholder="192.0.2.10 或 2001:db8::10" /></label></div>
           <footer><button type="button" class="secondary-button" @click="closeModal">取消</button><button type="submit" class="primary-button" :disabled="saving"><LoaderCircle v-if="saving" :size="17" class="spinning" /><Check v-else :size="17" />保存</button></footer>
         </form>
+      </div>
+
+      <div v-if="error" class="error-dialog-backdrop" @mousedown.self="error = ''">
+        <section class="error-dialog" role="alertdialog" aria-modal="true" aria-labelledby="error-dialog-title">
+          <header>
+            <div class="error-dialog-title"><AlertCircle :size="20" /><h2 id="error-dialog-title">操作失败</h2></div>
+            <button type="button" class="icon-button" title="关闭错误提示" @click="error = ''"><X :size="18" /></button>
+          </header>
+          <p>{{ error }}</p>
+          <footer><button type="button" class="primary-button" @click="error = ''">知道了</button></footer>
+        </section>
       </div>
     </main>
   `,
