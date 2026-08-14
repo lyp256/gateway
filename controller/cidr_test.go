@@ -34,13 +34,14 @@ func TestLoadCidrRuleMapFromStorage(t *testing.T) {
 		t.Fatal("set cidr rule with missing egress should fail")
 	}
 
-	var table bart.Table[uint32]
-	if err := loadCidrRuleMapFromStorage(&table, d); err != nil {
+	var table bart.Table[uint8]
+	egressIndexByName := map[string]uint8{"proxy-a": 0}
+	if err := loadCidrRuleMapFromStorage(&table, d, egressIndexByName); err != nil {
 		t.Fatalf("load cidr rule map: %v", err)
 	}
 	got, ok := table.Lookup(netip.MustParseAddr("203.0.113.8"))
-	if !ok || got != 4097 {
-		t.Fatalf("loaded route lookup = %d, %v, want 4097, true", got, ok)
+	if !ok || got != 0 {
+		t.Fatalf("loaded route lookup = %d, %v, want 0, true", got, ok)
 	}
 	if table.Size4() != 1 {
 		t.Fatalf("loaded route table size = %d, want 1", table.Size4())

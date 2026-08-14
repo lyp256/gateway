@@ -29,8 +29,8 @@ func (f *memoryMap) Delete(domain string) {
 	f.mux.Unlock()
 }
 
-func (f *memoryMap) Set(domain string, match MatchType, fwmark uint32) {
-	dest := RouteDest(uint32(match), fwmark)
+func (f *memoryMap) Set(domain string, match MatchType, value uint32) {
+	dest := RouteDest(uint32(match), value)
 	f.mux.Lock()
 	if dest != f.m[domain] {
 		f.m[domain] = dest

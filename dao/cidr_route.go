@@ -10,7 +10,7 @@ import (
 )
 
 type CidrRule struct {
-	Cidr  string `json:"cidr"`
+	Cidr   string `json:"cidr"`
 	Egress string `json:"egress"`
 }
 

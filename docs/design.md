@@ -70,12 +70,14 @@ DNS 请求
 当前 eBPF 程序在 `bpf/src/filter.c` 中：
 
 - 只接受以太网头后的 IPv4；
-- 查询 `route_lpm_map`，key 为目的 IPv4 `/32`；
-- 匹配后设置 `skb->mark`；
+- 查询 `route_lpm_map`，key 为目的 IPv4 `/32`，value 为 8 位 egress 索引；
+- 通过 `egress_map` 解析 egress 规则：`manual` 类型设置 `skb->mark`（兼容原实现），
+  `tproxy` 类型在 TC ingress 上调用 `bpf_skc_lookup_tcp` + `bpf_sk_assign` 把 TCP 交给本地透明监听 socket；
 - 只对 TCP SYN（`SYN=1, ACK=0`）上报连接事件；
 - IPv6、VLAN、IPv4 分片、IPv6 扩展头和 UDP 没有完整处理。
 
-当前控制器在 `controller/bpf.go` 中通过 `HANDLE_MIN_EGRESS` 将程序挂载到 TC egress。这个位置晚于本次数据包的常规路由决策，因此不能保证当前包重新经过 `fwmark` 策略路由。该问题是正式实现必须优先修复的架构问题。
+当前控制器在 `controller/bpf.go` 中通过 `HANDLE_MIN_INGRESS` 将程序挂载到 TC ingress，
+在策略路由查找前设置 mark 或完成 tproxy socket 分配。
 
 ### 3.3 当前已知缺口
 
@@ -262,7 +264,9 @@ egress 是规则引用的稳定目标，API 不应要求用户在每条规则中
 类型：
 
 - `manual`：Gateway 只负责写 mark，外部系统负责策略路由和出口；
-- `http_tunnel`：Gateway 负责连接隧道、TUN、地址、路由规则、NAT 和重连。
+- `http_tunnel`：Gateway 负责连接隧道、TUN、地址、路由规则、NAT 和重连；
+- `tproxy`：Gateway 在 TC ingress 上把匹配的 TCP 通过 `bpf_sk_assign` 交给本地透明监听
+  socket，`addr`/`port` 留空或为 0 时按包的原目的地址/端口查找。
 
 `fwmark` 必须显式校验冲突；基于设备名 hash 自动生成只能作为兼容默认值，不能作为持久化配置的唯一标识。
 

@@ -43,8 +43,17 @@ function hexMark(value) {
   return Number.isFinite(mark) ? `0x${(mark >>> 0).toString(16).padStart(4, '0')}` : '-'
 }
 
+function egressDesc(egress) {
+  if (!egress) return '-'
+  if (egress.type === 'tproxy') {
+    const port = Number(egress.tproxy?.port) || 0
+    return `${egress.tproxy?.addr || '0.0.0.0'}:${port}`
+  }
+  return hexMark(egress.fwmark)
+}
+
 function emptyEgress() {
-  return { name: '', type: 'manual', fwmark: '', tunnel: { url: '', token: '' } }
+  return { name: '', type: 'manual', fwmark: '', tunnel: { url: '', token: '' }, tproxy: { addr: '0.0.0.0', port: '' } }
 }
 
 function emptyDomain() {
@@ -124,8 +133,8 @@ const App = {
       { label: 'IPv4 路由', value: data.routes.length, icon: Route, tone: 'rose' },
     ])
 
-    const egressByMark = computed(() => new Map(data.egresses.map((item) => [Number(item.fwmark), item])))
     const egressByName = computed(() => new Map(data.egresses.map((item) => [item.name, item])))
+    const egressByIndex = computed(() => new Map(data.egresses.map((item) => [Number(item.index), item])))
     const selectedDomainEgress = computed(() => egressByName.value.get(domainForm.egress))
     const selectedCidrEgress = computed(() => egressByName.value.get(cidrForm.egress))
     const modalTitle = computed(() => ({
@@ -188,8 +197,9 @@ const App = {
       resetForm(egressForm, item ? {
         name: item.name,
         type: item.type || 'manual',
-        fwmark: item.fwmark,
+        fwmark: item.type === 'tproxy' ? '' : item.fwmark,
         tunnel: { url: item.tunnel?.url || '', token: item.tunnel?.token || '' },
+        tproxy: { addr: item.tproxy?.addr || '0.0.0.0', port: item.tproxy?.port || '' },
       } : emptyEgress())
       modal.value = 'egress'
     }
@@ -223,13 +233,17 @@ const App = {
 
     async function saveEgress() {
       const name = egressForm.name.trim()
-      if (!name || egressForm.fwmark === '' || Number(egressForm.fwmark) < 0) {
-        error.value = '请填写出口名称和有效的 fwmark。'
+      if (!name) {
+        error.value = '请填写出口名称。'
+        return
+      }
+      if (egressForm.type !== 'tproxy' && (egressForm.fwmark === '' || Number(egressForm.fwmark) < 0)) {
+        error.value = '请填写有效的 fwmark。'
         return
       }
       const originalName = editing.value?.name
       const conflict = data.egresses.find((item) => item.name !== originalName
-        && (item.name === name || Number(item.fwmark) === Number(egressForm.fwmark)))
+        && (item.name === name || (egressForm.type !== 'tproxy' && Number(item.fwmark) === Number(egressForm.fwmark))))
       if (conflict) {
         error.value = conflict.name === name ? '出口名称已存在。' : 'fwmark 已被其他出口使用。'
         return
@@ -242,9 +256,12 @@ const App = {
           body: JSON.stringify({
             name,
             type: egressForm.type,
-            fwmark: Number(egressForm.fwmark),
+            fwmark: egressForm.type === 'tproxy' ? 0 : Number(egressForm.fwmark),
             tunnel: egressForm.type === 'http_tunnel'
               ? { url: egressForm.tunnel.url.trim(), token: egressForm.tunnel.token }
+              : null,
+            tproxy: egressForm.type === 'tproxy'
+              ? { addr: egressForm.tproxy.addr.trim(), port: Number(egressForm.tproxy.port) || 0 }
               : null,
           }),
         })
@@ -369,8 +386,8 @@ const App = {
     onBeforeUnmount(() => window.removeEventListener('hashchange', syncViewFromHash))
 
     return {
-      addForView, addLabel, canAdd, cidrForm, closeModal, currentView, data, domainForm, egressForm,
-      egressByMark, egressByName, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
+      addForView, addLabel, canAdd, cidrForm, closeModal, currentView, data, domainForm, egressDesc,
+      egressByIndex, egressByName, egressForm, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
       navigate, openCidr, openDomain, openEgress, openHost, refresh, remove, saveCidr, saveDomain, saveEgress, saveHost,
       saving, selectedCidrEgress, selectedDomainEgress, stats,
     }
@@ -424,14 +441,14 @@ const App = {
               <section class="panel-list">
                 <div class="section-heading"><div><p class="eyebrow">EGRESS</p><h2>出口配置</h2></div><button class="text-button" @click="navigate('egresses')">查看全部 <ArrowUpRight :size="16" /></button></div>
                 <div v-if="data.egresses.length" class="compact-list">
-                  <div v-for="egress in data.egresses.slice(0, 4)" :key="egress.name" class="compact-row"><span class="row-name">{{ egress.name }}</span><span class="badge" :class="egress.type === 'http_tunnel' ? 'badge-teal' : 'badge-neutral'">{{ egress.type === 'http_tunnel' ? 'HTTP 隧道' : '手工出口' }}</span><code>{{ hexMark(egress.fwmark) }}</code></div>
+                  <div v-for="egress in data.egresses.slice(0, 4)" :key="egress.name" class="compact-row"><span class="row-name">{{ egress.name }}</span><span class="badge" :class="egress.type === 'http_tunnel' ? 'badge-teal' : egress.type === 'tproxy' ? 'badge-lime' : 'badge-neutral'">{{ egress.type === 'http_tunnel' ? 'HTTP 隧道' : egress.type === 'tproxy' ? '本地 TPROXY' : '手工出口' }}</span><code>{{ egressDesc(egress) }}</code></div>
                 </div>
                 <div v-else class="empty-inline"><Network :size="19" />尚未配置出口</div>
               </section>
               <section class="panel-list">
                 <div class="section-heading"><div><p class="eyebrow">ROUTE SNAPSHOT</p><h2>最近生效路由</h2></div><button class="text-button" @click="navigate('routes')">查看全部 <ArrowUpRight :size="16" /></button></div>
                 <div v-if="data.routes.length" class="compact-list">
-                  <div v-for="route in data.routes.slice(0, 4)" :key="route.cidr" class="compact-row"><code>{{ route.cidr }}</code><span>fwmark</span><code>{{ hexMark(route.value) }}</code></div>
+                  <div v-for="route in data.routes.slice(0, 4)" :key="route.cidr" class="compact-row"><code>{{ route.cidr }}</code><span>egress</span><code>{{ egressByIndex.get(Number(route.value))?.name || '索引 ' + route.value }}</code></div>
                 </div>
                 <div v-else class="empty-inline"><Route :size="19" />尚无动态 IPv4 路由</div>
               </section>
@@ -451,19 +468,19 @@ const App = {
 
           <section v-else-if="currentView === 'egresses'" class="view">
             <div class="section-heading"><div><p class="eyebrow">EGRESS TARGETS</p><h2>流量出口</h2></div><span class="item-count">{{ data.egresses.length }} 项</span></div>
-            <div v-if="data.egresses.length" class="table-wrap"><table><thead><tr><th>名称</th><th>类型</th><th>fwmark</th><th>隧道地址</th><th></th></tr></thead><tbody><tr v-for="item in data.egresses" :key="item.name"><td class="row-name">{{ item.name }}</td><td><span class="badge" :class="item.type === 'http_tunnel' ? 'badge-teal' : 'badge-neutral'">{{ item.type === 'http_tunnel' ? 'HTTP 隧道' : '手工出口' }}</span></td><td><code>{{ hexMark(item.fwmark) }}</code></td><td class="muted truncate">{{ item.tunnel?.url || '-' }}</td><td class="actions"><button class="icon-button" title="编辑出口" @click="openEgress(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除出口" @click="remove('egress', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-if="data.egresses.length" class="table-wrap"><table><thead><tr><th>名称</th><th>类型</th><th>处理方式</th><th>隧道地址</th><th></th></tr></thead><tbody><tr v-for="item in data.egresses" :key="item.name"><td class="row-name">{{ item.name }}</td><td><span class="badge" :class="item.type === 'http_tunnel' ? 'badge-teal' : item.type === 'tproxy' ? 'badge-lime' : 'badge-neutral'">{{ item.type === 'http_tunnel' ? 'HTTP 隧道' : item.type === 'tproxy' ? '本地 TPROXY' : '手工出口' }}</span></td><td><code>{{ egressDesc(item) }}</code></td><td class="muted truncate">{{ item.tunnel?.url || '-' }}</td><td class="actions"><button class="icon-button" title="编辑出口" @click="openEgress(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除出口" @click="remove('egress', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
             <div v-else class="empty-state"><Network :size="28" /><h2>还没有出口配置</h2><button class="primary-button" @click="openEgress()"><Plus :size="18" />新建出口</button></div>
           </section>
 
           <section v-else-if="currentView === 'domains'" class="view">
             <div class="section-heading"><div><p class="eyebrow">DNS ROUTING</p><h2>域名规则</h2></div><span class="item-count">{{ data.domains.length }} 项</span></div>
-            <div v-if="data.domains.length" class="table-wrap"><table><thead><tr><th>域名</th><th>匹配方式</th><th>出口</th><th>fwmark</th><th></th></tr></thead><tbody><tr v-for="item in data.domains" :key="item.match + item.domain"><td class="row-name">{{ item.domain }}</td><td><span class="badge badge-lime">{{ item.match === 'full' ? '精确匹配' : '域及子域' }}</span></td><td>{{ item.egress || '-' }}</td><td><code>{{ hexMark(egressByName.get(item.egress)?.fwmark) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openDomain(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('domain', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-if="data.domains.length" class="table-wrap"><table><thead><tr><th>域名</th><th>匹配方式</th><th>出口</th><th>出口方式</th><th></th></tr></thead><tbody><tr v-for="item in data.domains" :key="item.match + item.domain"><td class="row-name">{{ item.domain }}</td><td><span class="badge badge-lime">{{ item.match === 'full' ? '精确匹配' : '域及子域' }}</span></td><td>{{ item.egress || '-' }}</td><td><code>{{ egressDesc(egressByName.get(item.egress)) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openDomain(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('domain', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
             <div v-else class="empty-state"><Globe2 :size="28" /><h2>还没有域名规则</h2><button class="primary-button" @click="openDomain()"><Plus :size="18" />新建规则</button></div>
           </section>
 
           <section v-else-if="currentView === 'cidrs'" class="view">
             <div class="section-heading"><div><p class="eyebrow">IP ROUTING</p><h2>IP 规则</h2></div><span class="item-count">{{ data.cidrs.length }} 项</span></div>
-            <div v-if="data.cidrs.length" class="table-wrap"><table><thead><tr><th>CIDR 网段</th><th>出口</th><th>fwmark</th><th></th></tr></thead><tbody><tr v-for="item in data.cidrs" :key="item.cidr"><td class="row-name"><code>{{ item.cidr }}</code></td><td>{{ item.egress || '-' }}</td><td><code>{{ hexMark(egressByName.get(item.egress)?.fwmark) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openCidr(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('cidr', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-if="data.cidrs.length" class="table-wrap"><table><thead><tr><th>CIDR 网段</th><th>出口</th><th>出口方式</th><th></th></tr></thead><tbody><tr v-for="item in data.cidrs" :key="item.cidr"><td class="row-name"><code>{{ item.cidr }}</code></td><td>{{ item.egress || '-' }}</td><td><code>{{ egressDesc(egressByName.get(item.egress)) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openCidr(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('cidr', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
             <div v-else class="empty-state"><Network :size="28" /><h2>还没有 IP 规则</h2><button class="primary-button" @click="openCidr()"><Plus :size="18" />新建 IP 规则</button></div>
           </section>
 
@@ -475,7 +492,7 @@ const App = {
 
           <section v-else-if="currentView === 'routes'" class="view">
             <div class="section-heading"><div><p class="eyebrow">ACTIVE SNAPSHOT</p><h2>当前 IPv4 路由</h2></div><span class="item-count">{{ data.routes.length }} 项</span></div>
-            <div v-if="data.routes.length" class="table-wrap"><table><thead><tr><th>CIDR</th><th>fwmark</th><th>关联出口</th></tr></thead><tbody><tr v-for="item in data.routes" :key="item.cidr"><td><code>{{ item.cidr }}</code></td><td><code>{{ hexMark(item.value) }}</code></td><td>{{ egressByMark.get(Number(item.value))?.name || '-' }}</td></tr></tbody></table></div>
+            <div v-if="data.routes.length" class="table-wrap"><table><thead><tr><th>CIDR</th><th>egress 索引</th><th>关联出口</th></tr></thead><tbody><tr v-for="item in data.routes" :key="item.cidr"><td><code>{{ item.cidr }}</code></td><td><code>{{ item.value }}</code></td><td>{{ egressByIndex.get(Number(item.value))?.name || '-' }}</td></tr></tbody></table></div>
             <div v-else class="empty-state"><Route :size="28" /><h2>当前没有动态 IPv4 路由</h2></div>
           </section>
 
@@ -492,18 +509,19 @@ const App = {
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>{{ modalTitle }}</h2></div><button type="button" class="icon-button" title="关闭" @click="closeModal"><X :size="18" /></button></header>
           <div v-if="modal === 'egress'" class="form-fields">
             <label><span>名称</span><input v-model="egressForm.name" :disabled="!!editing" required placeholder="proxy-a" /></label>
-            <label><span>类型</span><select v-model="egressForm.type"><option value="manual">自定义出口</option><option value="http_tunnel">HTTP 隧道</option></select></label>
-            <label><span>fwmark</span><input v-model.number="egressForm.fwmark" type="number" min="0" step="1" required placeholder="4097" /><small v-if="egressForm.fwmark !== ''">{{ hexMark(egressForm.fwmark) }}</small></label>
+            <label><span>类型</span><select v-model="egressForm.type"><option value="manual">自定义出口</option><option value="http_tunnel">HTTP 隧道</option><option value="tproxy">本地 TPROXY</option></select></label>
+            <label v-if="egressForm.type !== 'tproxy'"><span>fwmark</span><input v-model.number="egressForm.fwmark" type="number" min="0" step="1" required placeholder="4097" /><small v-if="egressForm.fwmark !== ''">{{ hexMark(egressForm.fwmark) }}</small></label>
             <template v-if="egressForm.type === 'http_tunnel'"><label><span>隧道地址</span><input v-model="egressForm.tunnel.url" type="url" placeholder="https://tunnel.example/connect" /></label><label><span>访问令牌</span><input v-model="egressForm.tunnel.token" type="password" autocomplete="new-password" placeholder="token" /></label></template>
+            <template v-if="egressForm.type === 'tproxy'"><label><span>监听地址</span><input v-model="egressForm.tproxy.addr" placeholder="0.0.0.0" /><small>留空或 0.0.0.0 表示按包的原目的地址查找透明监听 socket。</small></label><label><span>监听端口</span><input v-model.number="egressForm.tproxy.port" type="number" min="0" max="65535" step="1" placeholder="12345" /><small>0 表示按包的原目的端口匹配。</small></label></template>
           </div>
           <div v-else-if="modal === 'domain'" class="form-fields">
             <label><span>域名</span><input v-model="domainForm.domain" :disabled="!!editing" required placeholder="example.com" /><small v-if="editing">域名与匹配方式共同构成规则标识。</small></label>
             <label><span>匹配方式</span><select v-model="domainForm.match" :disabled="!!editing"><option value="domain">域及其子域</option><option value="full">精确域名</option></select></label>
-            <label><span>关联出口</span><select v-model="domainForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ hexMark(item.fwmark) }}</option></select><small v-if="selectedDomainEgress">将使用 {{ hexMark(selectedDomainEgress.fwmark) }}</small></label>
+            <label><span>关联出口</span><select v-model="domainForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ egressDesc(item) }}</option></select><small v-if="selectedDomainEgress">将使用 {{ egressDesc(selectedDomainEgress) }}</small></label>
           </div>
           <div v-else-if="modal === 'cidr'" class="form-fields">
             <label><span>CIDR 网段</span><input v-model="cidrForm.cidr" :disabled="!!editing" required placeholder="203.0.113.0/24" /><small>填写 IPv4 网段，如 203.0.113.0/24，直接按最长前缀匹配，不依赖 DNS 解析。</small></label>
-            <label><span>关联出口</span><select v-model="cidrForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ hexMark(item.fwmark) }}</option></select><small v-if="selectedCidrEgress">将使用 {{ hexMark(selectedCidrEgress.fwmark) }}</small></label>
+            <label><span>关联出口</span><select v-model="cidrForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ egressDesc(item) }}</option></select><small v-if="selectedCidrEgress">将使用 {{ egressDesc(selectedCidrEgress) }}</small></label>
           </div>
           <div v-else class="form-fields"><label><span>主机名</span><input v-model="hostForm.name" :disabled="!!editing" required placeholder="internal.example.com" /></label><label><span>IP 地址</span><input v-model="hostForm.ip" required placeholder="192.0.2.10 或 2001:db8::10" /></label></div>
           <footer><button type="button" class="secondary-button" @click="closeModal">取消</button><button type="submit" class="primary-button" :disabled="saving"><LoaderCircle v-if="saving" :size="17" class="spinning" /><Check v-else :size="17" />保存</button></footer>

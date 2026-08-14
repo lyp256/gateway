@@ -85,19 +85,19 @@ func TestCidrRuleHTTP(t *testing.T) {
 	assertEgressStatus(t, ctl, http.MethodPut, "/api/v1/cidrs", `{"cidr":"203.0.113.0/24","egress":"proxy-a"}`, http.StatusOK)
 
 	got, ok := ctl.(*controller).routeTable.Lookup(netip.MustParseAddr("203.0.113.5"))
-	if !ok || got != 4097 {
-		t.Fatalf("route table lookup = %d, %v, want 4097, true", got, ok)
+	if !ok || got != 0 {
+		t.Fatalf("route table lookup = %d, %v, want 0, true", got, ok)
 	}
 
 	// 被 CIDR 规则引用的出口不可删除
 	assertEgressStatus(t, ctl, http.MethodDelete, "/api/v1/egresses/proxy-a", "", http.StatusConflict)
 
-	// 更新同一 CIDR 的 fwmark 后应覆盖路由表
+	// 更新同一 CIDR 的 egress 后应覆盖路由表（value 为该 egress 的索引）
 	assertEgressStatus(t, ctl, http.MethodPost, "/api/v1/egresses", `{"name":"proxy-b","type":"manual","fwmark":4098}`, http.StatusOK)
 	assertEgressStatus(t, ctl, http.MethodPut, "/api/v1/cidrs", `{"cidr":"203.0.113.0/24","egress":"proxy-b"}`, http.StatusOK)
 	got, ok = ctl.(*controller).routeTable.Lookup(netip.MustParseAddr("203.0.113.5"))
-	if !ok || got != 4098 {
-		t.Fatalf("route table lookup after update = %d, %v, want 4098, true", got, ok)
+	if !ok || got != 1 {
+		t.Fatalf("route table lookup after update = %d, %v, want 1, true", got, ok)
 	}
 
 	// 删除规则后路由应消失，出口可删除
@@ -106,6 +106,41 @@ func TestCidrRuleHTTP(t *testing.T) {
 		t.Fatal("route table lookup after delete should be missing")
 	}
 	assertEgressStatus(t, ctl, http.MethodDelete, "/api/v1/egresses/proxy-a", "", http.StatusNoContent)
+}
+
+func TestTproxyEgressHTTP(t *testing.T) {
+	ctl := newEgressTestController(t)
+
+	// 非法 tproxy 地址应被拒绝
+	assertEgressStatus(t, ctl, http.MethodPost, "/api/v1/egresses",
+		`{"name":"tp","type":"tproxy","tproxy":{"addr":"not-an-ip","port":12345}}`, http.StatusBadRequest)
+	// 合法 tproxy 出口不占用 fwmark，且允许同时存在多个
+	assertEgressStatus(t, ctl, http.MethodPost, "/api/v1/egresses",
+		`{"name":"tp","type":"tproxy","tproxy":{"addr":"0.0.0.0","port":12345}}`, http.StatusOK)
+	assertEgressStatus(t, ctl, http.MethodPost, "/api/v1/egresses",
+		`{"name":"tp2","type":"tproxy","tproxy":{"port":12346}}`, http.StatusOK)
+
+	assertEgressStatus(t, ctl, http.MethodPut, "/api/v1/cidrs",
+		`{"cidr":"203.0.113.0/24","egress":"tp"}`, http.StatusOK)
+	got, ok := ctl.(*controller).routeTable.Lookup(netip.MustParseAddr("203.0.113.5"))
+	if !ok || got != 0 {
+		t.Fatalf("route table lookup = %d, %v, want 0, true", got, ok)
+	}
+
+	// egress 响应应携带运行时索引，供前端把路由 value 对应回出口
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/egresses/tp", nil)
+	res := httptest.NewRecorder()
+	ctl.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/egresses/tp status = %d: %s", res.Code, res.Body.String())
+	}
+	var tp map[string]json.RawMessage
+	if err := json.Unmarshal(res.Body.Bytes(), &tp); err != nil {
+		t.Fatalf("decode egress response: %v: %s", err, res.Body.String())
+	}
+	if got := string(tp["index"]); got != "0" {
+		t.Fatalf("egress response index = %s, want 0", got)
+	}
 }
 
 func TestHostsHTTPResponseUsesFrontendFieldNames(t *testing.T) {

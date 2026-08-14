@@ -14,7 +14,7 @@ import (
 	"github.com/lyp256/gateway/schema"
 )
 
-func (ctl *controller) getRouteTableTree(ctx context.Context, _ *struct{}) (*schema.Body[[]bart.DumpListNode[uint32]], error) {
+func (ctl *controller) getRouteTableTree(ctx context.Context, _ *struct{}) (*schema.Body[[]bart.DumpListNode[uint8]], error) {
 	ctl.routeMux.RLock()
 	defer ctl.routeMux.RUnlock()
 	routes := ctl.routeTable.DumpList4()
@@ -24,10 +24,10 @@ func (ctl *controller) getRouteTableTree(ctx context.Context, _ *struct{}) (*sch
 func (ctl *controller) getRouteTables(ctx context.Context, _ *struct{}) (*schema.Body[[]schema.RouteTableItem], error) {
 	res := make([]schema.RouteTableItem, 0, 0)
 	ctl.routeMux.RLock()
-	ctl.routeTable.AllSorted4()(func(cidr netip.Prefix, v uint32) bool {
+	ctl.routeTable.AllSorted4()(func(cidr netip.Prefix, v uint8) bool {
 		res = append(res, schema.RouteTableItem{
 			CIDR:  cidr,
-			Value: v,
+			Value: uint32(v),
 		})
 		return true
 	})
@@ -67,7 +67,11 @@ func (ctl *controller) setCidrRule(ctx context.Context, in *schema.Body[dao.Cidr
 		}
 		return nil, huma.NewError(500, "create data", err)
 	}
-	ctl.setCidrRoute(prefix, egress.FwMark)
+	egressIdx, ok := ctl.egressIndex(egress.Name)
+	if !ok {
+		return nil, huma.NewError(http.StatusInternalServerError, "egress index not found", nil)
+	}
+	ctl.setCidrRoute(prefix, egressIdx)
 	return schema.NewBody(in.Body), nil
 }
 
@@ -97,7 +101,11 @@ func (ctl *controller) setDomainRule(ctx context.Context, in *schema.Body[dao.Do
 		}
 		return nil, huma.NewError(500, "create data", err)
 	}
-	ctl.dnsTable.Set(in.Body.Domain, in.Body.Match, egress.FwMark)
+	egressIdx, ok := ctl.egressIndex(egress.Name)
+	if !ok {
+		return nil, huma.NewError(http.StatusInternalServerError, "egress index not found", nil)
+	}
+	ctl.dnsTable.Set(in.Body.Domain, in.Body.Match, uint32(egressIdx))
 	return schema.NewBody(in.Body), nil
 }
 
@@ -159,45 +167,74 @@ func (ctl *controller) deleteHosts(ctx context.Context, in *struct {
 	return nil, nil
 }
 
-func (ctl *controller) getEgresses(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.Egress], error) {
+// egressResponse 在持久化 egress 基础上附加运行时索引，供前端把路由表 value 对应回 egress。
+type egressResponse struct {
+	dao.Egress
+	Index uint8 `json:"index"`
+}
+
+func (ctl *controller) toEgressResponse(egress dao.Egress) egressResponse {
+	idx, _ := ctl.egressIndex(egress.Name)
+	return egressResponse{Egress: egress, Index: idx}
+}
+
+func (ctl *controller) getEgresses(ctx context.Context, _ *struct{}) (*schema.Body[[]egressResponse], error) {
 	list, err := ctl.storage.ListEgress()
 	if err != nil {
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
-	return schema.NewBody(list), nil
+	res := make([]egressResponse, 0, len(list))
+	for _, egress := range list {
+		res = append(res, ctl.toEgressResponse(egress))
+	}
+	return schema.NewBody(res), nil
 }
 
 func (ctl *controller) getEgress(ctx context.Context, in *struct {
 	Name string `path:"name"`
-}) (*schema.Body[dao.Egress], error) {
+}) (*schema.Body[egressResponse], error) {
 	tun, err := ctl.storage.GetEgress(in.Name)
 	if err != nil {
 		return nil, egressError(err)
 	}
-	return schema.NewBody(tun), nil
+	return schema.NewBody(ctl.toEgressResponse(tun)), nil
 }
 
-func (ctl *controller) createEgress(ctx context.Context, in *schema.Body[dao.Egress]) (*schema.Body[dao.Egress], error) {
+func (ctl *controller) createEgress(ctx context.Context, in *schema.Body[dao.Egress]) (*schema.Body[egressResponse], error) {
 	if in.Body.Name == "" {
 		return nil, huma.NewError(http.StatusBadRequest, "egress name is required")
 	}
 	if err := ctl.storage.CreateEgress(in.Body); err != nil {
 		return nil, egressError(err)
 	}
-	return schema.NewBody(in.Body), nil
+	saved, err := ctl.storage.GetEgress(in.Body.Name)
+	if err != nil {
+		return nil, egressError(err)
+	}
+	if err := ctl.addEgress(saved); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "apply egress", err)
+	}
+	return schema.NewBody(ctl.toEgressResponse(saved)), nil
 }
 
 func (ctl *controller) updateEgress(ctx context.Context, in *struct {
 	Name string `path:"name"`
 	Body dao.Egress
-}) (*schema.Body[dao.Egress], error) {
+}) (*schema.Body[egressResponse], error) {
 	if in.Body.Name != in.Name {
 		return nil, huma.NewError(http.StatusBadRequest, "egress name cannot be changed")
 	}
 	if err := ctl.storage.UpdateEgress(in.Body); err != nil {
 		return nil, egressError(err)
 	}
-	return schema.NewBody(in.Body), nil
+	saved, err := ctl.storage.GetEgress(in.Body.Name)
+	if err != nil {
+		return nil, egressError(err)
+	}
+	if err := ctl.syncEgressRule(saved); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "apply egress", err)
+	}
+	return schema.NewBody(ctl.toEgressResponse(saved)), nil
 }
 
 func egressError(err error) error {
@@ -212,6 +249,8 @@ func egressError(err error) error {
 		return huma.Error404NotFound("egress not found")
 	case errors.Is(err, dao.ErrKeyNotFound):
 		return huma.Error404NotFound("egress not found")
+	case errors.Is(err, dao.ErrInvalidEgress):
+		return huma.NewError(http.StatusBadRequest, err.Error())
 	default:
 		return huma.NewError(http.StatusInternalServerError, "", err)
 	}
@@ -223,5 +262,6 @@ func (ctl *controller) deleteEgress(ctx context.Context, in *struct {
 	if err := ctl.storage.DeleteEgress(in.Name); err != nil {
 		return nil, egressError(err)
 	}
+	ctl.dropEgress(in.Name)
 	return nil, nil
 }

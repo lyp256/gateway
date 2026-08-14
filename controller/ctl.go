@@ -35,13 +35,14 @@ func NewController(storage *dao.Dao, dnsServers []query.DNSQuerier, e chi.Router
 
 	dnsServers = append([]query.DNSQuerier{query.NewStatic(hosts, mux.RLocker())}, dnsServers...)
 	c := controller{
-		hostsMux:   mux,
-		hosts:      hosts,
-		dnsServers: dnsServers,
-		dnsCache:   newDNSCache(),
-		http:       e,
-		waitReadCh: make(chan struct{}),
-		storage:    storage,
+		hostsMux:          mux,
+		hosts:             hosts,
+		dnsServers:        dnsServers,
+		dnsCache:          newDNSCache(),
+		http:              e,
+		waitReadCh:        make(chan struct{}),
+		storage:           storage,
+		egressIndexByName: make(map[string]uint8),
 	}
 	c.initMetrics()
 	c.registerHttpAPI()
@@ -60,11 +61,16 @@ type controller struct {
 	// Recently resolved DNS responses, bounded by dnsCacheSize.
 	dnsCache *lru.Cache[string, dnsCacheEntry]
 	// ebpf 路由表
-	routeTable bart.Table[uint32]
+	routeTable bart.Table[uint8]
 	// 保护 routeTable 的并发读写（DNS 解析与 IP 规则管理可能同时进行）
 	routeMux sync.RWMutex
 	// dns 路由表
 	dnsTable router.Router
+	// egress 运行时索引表：name -> 索引（0-255），与 route_lpm_map value / egress_map key 对应
+	egressMux         sync.RWMutex
+	egressIndexByName map[string]uint8
+	egressRules       [bpf.MaxEgressRules]bpf.FilterEgressRule
+	egressNextIndex   uint8
 
 	// 网卡
 	netDevs []string
@@ -92,13 +98,16 @@ func (ctl *controller) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := ctl.loadEgressRules(ctl.storage); err != nil {
+		return err
+	}
 	routeMap := make(map[string]uint64)
-	err = loadDomainRuleMapFromStorage(ctl.storage, routeMap)
+	err = loadDomainRuleMapFromStorage(ctl.storage, routeMap, ctl.egressIndexByName)
 	if err != nil {
 		return err
 	}
 	ctl.dnsTable = router.NewMemoryMap(routeMap)
-	err = loadCidrRuleMapFromStorage(&ctl.routeTable, ctl.storage)
+	err = loadCidrRuleMapFromStorage(&ctl.routeTable, ctl.storage, ctl.egressIndexByName)
 	if err != nil {
 		return err
 	}

@@ -150,28 +150,28 @@ func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 }
 
 func (ctl *controller) dnsToRoute(name string, ips ...netip.Addr) {
-	fwmark, ok := ctl.dnsTable.Match(name)
+	value, ok := ctl.dnsTable.Match(name)
 	if !ok {
 		return
 	}
-	ctl.addIRoute(fwmark, ips...)
+	ctl.addIRoute(uint8(value), ips...)
 }
 
-func (ctl *controller) addIRoute(fwmark uint32, ips ...netip.Addr) {
+func (ctl *controller) addIRoute(egressIdx uint8, ips ...netip.Addr) {
 
 	updateIps := make([]bpf.FilterBpfLpmTrieKeyV4, 0, len(ips))
-	fwmarts := make([]uint32, 0, len(ips))
+	values := make([]uint8, 0, len(ips))
 	for _, ip := range ips {
 		if !ip.Is4() {
 			continue
 		}
 		ctl.routeMux.Lock()
-		oldFwmark, ok := ctl.routeTable.Lookup(ip)
-		if !ok || oldFwmark != fwmark {
-			ctl.routeTable.Insert(netip.PrefixFrom(ip, 32), fwmark)
+		oldIdx, ok := ctl.routeTable.Lookup(ip)
+		if !ok || oldIdx != egressIdx {
+			ctl.routeTable.Insert(netip.PrefixFrom(ip, 32), egressIdx)
 			updateIps = append(updateIps, bpf.ToFilterBpfLpmTrieKeyV4(netip.PrefixFrom(ip, 32)))
-			fwmarts = append(fwmarts, fwmark)
-			slog.Debug("add route", "ip", ip, "fwmark", fwmark, "raw", ip.As4())
+			values = append(values, egressIdx)
+			slog.Debug("add route", "ip", ip, "egress_index", egressIdx, "raw", ip.As4())
 		}
 		ctl.routeMux.Unlock()
 	}
@@ -179,7 +179,7 @@ func (ctl *controller) addIRoute(fwmark uint32, ips ...netip.Addr) {
 		return
 	}
 
-	updeted, err := ctl.bpf.FilterMaps.RouteLpmMap.BatchUpdate(updateIps, fwmarts, nil)
+	updeted, err := ctl.bpf.FilterMaps.RouteLpmMap.BatchUpdate(updateIps, values, nil)
 	if err != nil {
 		//TODO 实现淘汰
 		slog.Error("update ebpf route failed", "err", err)
@@ -197,21 +197,14 @@ func loadHostsFromStorage(db *dao.Dao, hosts map[string]netip.Addr) error {
 	})
 }
 
-func loadDomainRuleMapFromStorage(db *dao.Dao, routerMap map[string]uint64) error {
-	fwmarkByEgress := make(map[string]uint32)
-	if err := db.EgressIterator(func(egress dao.Egress) error {
-		fwmarkByEgress[egress.Name] = egress.FwMark
-		return nil
-	}); err != nil {
-		return err
-	}
+func loadDomainRuleMapFromStorage(db *dao.Dao, routerMap map[string]uint64, egressIndexByName map[string]uint8) error {
 	return db.DomainRuleIterator(func(dr dao.DomainRule) error {
-		fwmark, ok := fwmarkByEgress[dr.Egress]
+		idx, ok := egressIndexByName[dr.Egress]
 		if !ok {
 			slog.Error("domain references missing egress", "match", dr.Match, "domain", dr.Domain, "egress", dr.Egress)
 			return nil
 		}
-		routerMap[router.ReverseDomainString(dr.Domain)] = router.RouteDest(uint32(dr.Match), fwmark)
+		routerMap[router.ReverseDomainString(dr.Domain)] = router.RouteDest(uint32(dr.Match), uint32(idx))
 		return nil
 	})
 }

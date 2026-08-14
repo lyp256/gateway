@@ -10,7 +10,7 @@ import (
 type Router interface {
 	Match(domain string) (uint32, bool)
 	Length() int64
-	Set(domain string, t MatchType, fwmark uint32)
+	Set(domain string, t MatchType, value uint32)
 	Delete(domain string)
 }
 
@@ -19,9 +19,9 @@ const (
 	MatchFullDomain MatchType = 'F'
 )
 
-// RouteDest 高 32 位为内部使用标志，低 32 位为 fwmark
-func RouteDest(flag uint32, fwmark uint32) uint64 {
-	return uint64(flag)<<32 + uint64(fwmark)
+// RouteDest 高 32 位为内部使用标志，低 32 位为 egress 运行时索引。
+func RouteDest(flag uint32, egressIdx uint32) uint64 {
+	return uint64(flag)<<32 + uint64(egressIdx)
 }
 
 type MatchType byte

@@ -31,6 +31,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 	}
 	defer ctl.bpf.Close()
 
+	// egress 规则先落到 egress_map，路由表里的索引才能被解析。
+	ctl.syncEgressMapToBPF()
+
 	if len(ctl.netDevs) == 0 {
 		iface, err := getDefaultGatewayInterface()
 		if err != nil {
@@ -42,9 +45,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 		}
 		defer clear()
 	} else {
-	for _, name := range ctl.netDevs {
-		iface, err := netlink.LinkByName(name)
-		if err != nil {
+		for _, name := range ctl.netDevs {
+			iface, err := netlink.LinkByName(name)
+			if err != nil {
 				return err
 			}
 			clear, err := mountEbpfProg(iface, ctl.bpf.TcGatewayFilter.FD())
@@ -96,7 +99,13 @@ func (ctl *controller) handleEvent(ctx context.Context) error {
 				slog.Error("tcp stream event", "err", err)
 				continue
 			}
-			slog.Info("tcp stream event", "src", conn.Src.String(), "dest", conn.Dest.String(), "mark", conn.Mark)
+			slog.Info("tcp stream event",
+				"src", conn.Src.String(),
+				"dest", conn.Dest.String(),
+				"mark", conn.Mark,
+				"egress_index", conn.EgressIdx,
+				"egress_type", bpf.EgressRuleTypeString(conn.EgressType),
+			)
 		}
 	}
 }
@@ -151,13 +160,13 @@ func mountEbpfProg(link netlink.Link, fd int) (func() error, error) {
 		return nil, fmt.Errorf("link: %s 创建 clsact qdisc 失败:%w", link.Attrs().Name, err)
 	}
 
-	// 相当于执行: tc filter add dev eth0 egress bpf fd <fd> da
+	// 相当于执行: tc filter add dev eth0 ingress bpf fd <fd> da
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_EGRESS,
+			Parent:    netlink.HANDLE_MIN_INGRESS,
 			Priority:  1,
-			Protocol:  unix.ETH_P_IP, // 拦截 IP 协议流量
+			Protocol:  unix.ETH_P_IP, // 处理 IP 协议流量
 		},
 		Fd:           fd,
 		Name:         bpf.FilterProgTcGatewayFilter,
@@ -185,21 +194,25 @@ func clearEbpfProgByName(progName string) error {
 			continue
 		}
 
-		filters, err := netlink.FilterList(l, netlink.HANDLE_MIN_EGRESS)
-		if err != nil {
-			slog.Error("list net filter", "err", err)
-		}
-
-		for _, f := range filters {
-			bf, ok := f.(*netlink.BpfFilter)
-			if !ok || bf.Id == 0 {
+		// 同时清理 ingress 与 egress，兼容升级前遗留的挂载。
+		for _, parent := range []uint32{netlink.HANDLE_MIN_INGRESS, netlink.HANDLE_MIN_EGRESS} {
+			filters, err := netlink.FilterList(l, parent)
+			if err != nil {
+				slog.Error("list net filter", "err", err)
 				continue
 			}
 
-			if bf.Name == progName {
-				err = netlink.FilterDel(f)
-				if err != nil {
-					slog.Error("delete filter", "err", err)
+			for _, f := range filters {
+				bf, ok := f.(*netlink.BpfFilter)
+				if !ok || bf.Id == 0 {
+					continue
+				}
+
+				if bf.Name == progName {
+					err = netlink.FilterDel(f)
+					if err != nil {
+						slog.Error("delete filter", "err", err)
+					}
 				}
 			}
 		}

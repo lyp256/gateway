@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 
 	"github.com/lyp256/gateway/sconv"
 	"go.etcd.io/bbolt"
@@ -15,6 +16,7 @@ var (
 	ErrEgressFwMarkExists = errors.New("egress fwmark already exists")
 	ErrEgressNotFound     = errors.New("egress not found")
 	ErrEgressInUse        = errors.New("egress is referenced by rules")
+	ErrInvalidEgress      = errors.New("invalid egress")
 )
 
 type EgressType string
@@ -24,6 +26,8 @@ const (
 	EgressManual = "manual"
 	// HTTP 隧道，网关启动时负责维护 tun 设备以及路由表、策略路由等。
 	EgressHTTPTunnel = "http_tunnel"
+	// 本地 TPROXY 监听，网关在 TC ingress 上通过 bpf_sk_assign 把 TCP 交给该 socket。
+	EgressTproxy = "tproxy"
 )
 
 type EgressTunnel struct {
@@ -31,11 +35,19 @@ type EgressTunnel struct {
 	Token string `json:"token"`
 }
 
+// EgressTproxyConfig 描述本地透明监听 socket 的查找条件。
+// Addr 为空或 0.0.0.0 时按包的原目的地址查找；Port 为 0 时按包的原目的端口查找。
+type EgressTproxyConfig struct {
+	Addr string `json:"addr,omitempty"`
+	Port uint16 `json:"port,omitempty"`
+}
+
 type Egress struct {
-	Name   string        `json:"name"`
-	Type   EgressType    `json:"type"`
-	FwMark uint32        `json:"fwmark"`
-	Tunnel *EgressTunnel `json:"tunnel,omitempty"`
+	Name   string              `json:"name"`
+	Type   EgressType          `json:"type"`
+	FwMark uint32              `json:"fwmark,omitempty"`
+	Tunnel *EgressTunnel       `json:"tunnel,omitempty"`
+	Tproxy *EgressTproxyConfig `json:"tproxy,omitempty"`
 }
 
 // marshalEgressKey 组装存储 key：PrefixTunnel + Egress name。
@@ -52,6 +64,9 @@ func (d *Dao) UpdateEgress(egress Egress) error {
 }
 
 func (d *Dao) storeEgress(egress Egress, mustExist bool) error {
+	if err := validateEgress(&egress); err != nil {
+		return err
+	}
 	key := marshalEgressKey(egress.Name)
 	value, err := json.Marshal(egress)
 	if err != nil {
@@ -75,13 +90,38 @@ func (d *Dao) storeEgress(egress Egress, mustExist bool) error {
 			if err := json.Unmarshal(otherValue, &other); err != nil {
 				return err
 			}
-			if other.FwMark == egress.FwMark {
+			if other.FwMark != 0 && egress.FwMark != 0 && other.FwMark == egress.FwMark {
 				return fmt.Errorf("%w: %s", ErrEgressFwMarkExists, other.Name)
 			}
 		}
 
 		return bucket.Put(key, value)
 	})
+}
+
+// validateEgress 规范化并校验 egress 配置。
+// tproxy 出口不占用 fwmark（统一置 0），避免与手工出口的 mark 冲突。
+func validateEgress(egress *Egress) error {
+	switch egress.Type {
+	case EgressTproxy:
+		egress.FwMark = 0
+		if egress.Tproxy == nil {
+			egress.Tproxy = &EgressTproxyConfig{}
+		}
+		if egress.Tproxy.Addr == "" {
+			egress.Tproxy.Addr = "0.0.0.0"
+		}
+		addr, err := netip.ParseAddr(egress.Tproxy.Addr)
+		if err != nil || !addr.Is4() {
+			return fmt.Errorf("%w: invalid tproxy addr %q: must be an IPv4 address", ErrInvalidEgress, egress.Tproxy.Addr)
+		}
+		egress.Tproxy.Addr = addr.String()
+	case "", EgressManual, EgressHTTPTunnel:
+		egress.Tproxy = nil
+	default:
+		return fmt.Errorf("%w: unsupported egress type %q", ErrInvalidEgress, egress.Type)
+	}
+	return nil
 }
 
 func (d *Dao) GetEgress(name string) (Egress, error) {

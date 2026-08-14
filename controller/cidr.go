@@ -11,26 +11,19 @@ import (
 
 // loadCidrRuleMapFromStorage 启动时把持久化的显式 IP/CIDR 规则写入路由表，
 // 这些规则不依赖 DNS 解析，直接参与 LPM 匹配。
-func loadCidrRuleMapFromStorage(t *bart.Table[uint32], db *dao.Dao) error {
-	fwmarkByEgress := make(map[string]uint32)
-	if err := db.EgressIterator(func(egress dao.Egress) error {
-		fwmarkByEgress[egress.Name] = egress.FwMark
-		return nil
-	}); err != nil {
-		return err
-	}
+func loadCidrRuleMapFromStorage(t *bart.Table[uint8], db *dao.Dao, egressIndexByName map[string]uint8) error {
 	return db.CidrRuleIterator(func(cr dao.CidrRule) error {
 		prefix, err := dao.NormalizeCidr(cr.Cidr)
 		if err != nil {
 			slog.Error("invalid cidr rule", "cidr", cr.Cidr, "err", err)
 			return nil
 		}
-		fwmark, ok := fwmarkByEgress[cr.Egress]
+		idx, ok := egressIndexByName[cr.Egress]
 		if !ok {
 			slog.Error("cidr references missing egress", "cidr", cr.Cidr, "egress", cr.Egress)
 			return nil
 		}
-		t.Insert(prefix, fwmark)
+		t.Insert(prefix, idx)
 		return nil
 	})
 }
@@ -41,9 +34,9 @@ func (ctl *controller) syncRoutesToBPF() {
 		return
 	}
 	keys := make([]bpf.FilterBpfLpmTrieKeyV4, 0, ctl.routeTable.Size4())
-	values := make([]uint32, 0, cap(keys))
+	values := make([]uint8, 0, cap(keys))
 	ctl.routeMux.RLock()
-	ctl.routeTable.All4()(func(cidr netip.Prefix, v uint32) bool {
+	ctl.routeTable.All4()(func(cidr netip.Prefix, v uint8) bool {
 		keys = append(keys, bpf.ToFilterBpfLpmTrieKeyV4(cidr))
 		values = append(values, v)
 		return true
@@ -63,21 +56,21 @@ func (ctl *controller) syncRoutesToBPF() {
 }
 
 // setCidrRoute 新增或更新一条显式 IP/CIDR 路由（写入内存路由表与 BPF LPM map）。
-func (ctl *controller) setCidrRoute(prefix netip.Prefix, fwmark uint32) {
+func (ctl *controller) setCidrRoute(prefix netip.Prefix, egressIdx uint8) {
 	prefix = prefix.Masked()
 	ctl.routeMux.Lock()
 	old, ok := ctl.routeTable.Get(prefix)
-	if ok && old == fwmark {
+	if ok && old == egressIdx {
 		ctl.routeMux.Unlock()
 		return
 	}
-	ctl.routeTable.Insert(prefix, fwmark)
+	ctl.routeTable.Insert(prefix, egressIdx)
 	ctl.routeMux.Unlock()
 
 	if ctl.bpf.FilterMaps.RouteLpmMap == nil {
 		return
 	}
-	if err := ctl.bpf.FilterMaps.RouteLpmMap.Put(bpf.ToFilterBpfLpmTrieKeyV4(prefix), fwmark); err != nil {
+	if err := ctl.bpf.FilterMaps.RouteLpmMap.Put(bpf.ToFilterBpfLpmTrieKeyV4(prefix), egressIdx); err != nil {
 		slog.Error("update ebpf cidr route failed", "cidr", prefix, "err", err)
 	}
 }

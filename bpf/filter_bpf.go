@@ -18,10 +18,21 @@ type FilterBpfLpmTrieKeyV4 struct {
 	Data      [4]uint8
 }
 
+type FilterEgressRule struct {
+	_          structs.HostLayout
+	Type       uint8
+	Pad        [3]uint8
+	Fwmark     uint32
+	TproxyAddr [4]uint8
+	TproxyPort [2]uint8
+	Pad2       [2]uint8
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	FilterMapEgressMap        = "egress_map"
 	FilterMapEventsRingbuf    = "events_ringbuf"
 	FilterMapRouteLpmMap      = "route_lpm_map"
 	FilterProgTcGatewayFilter = "tc_gateway_filter"
@@ -76,6 +87,7 @@ type FilterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type FilterMapSpecs struct {
+	EgressMap     *ebpf.MapSpec `ebpf:"egress_map"`
 	EventsRingbuf *ebpf.MapSpec `ebpf:"events_ringbuf"`
 	RouteLpmMap   *ebpf.MapSpec `ebpf:"route_lpm_map"`
 }
@@ -106,12 +118,14 @@ func (o *FilterObjects) Close() error {
 //
 // It can be passed to LoadFilterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type FilterMaps struct {
+	EgressMap     *ebpf.Map `ebpf:"egress_map"`
 	EventsRingbuf *ebpf.Map `ebpf:"events_ringbuf"`
 	RouteLpmMap   *ebpf.Map `ebpf:"route_lpm_map"`
 }
 
 func (m *FilterMaps) Close() error {
 	return _FilterClose(
+		m.EgressMap,
 		m.EventsRingbuf,
 		m.RouteLpmMap,
 	)
