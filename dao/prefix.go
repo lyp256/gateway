@@ -7,7 +7,7 @@ const (
 	PrefixDomainRule = "dr:"
 	PrifixCidr       = "cidr:"
 	PrefixHosts      = "host:"
-	PrefixTunnel     = "tunnel:"
+	PrefixEgress     = "egress:"
 )
 
 func MarshalKey(prefix, key string) string {

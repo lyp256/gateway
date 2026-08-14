@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/lyp256/gateway/dns/router"
 	"go.etcd.io/bbolt"
 )
 
@@ -44,5 +45,30 @@ func TestEgressUniqueness(t *testing.T) {
 	}
 	if err := d.UpdateEgress(Egress{Name: "proxy-missing", FwMark: 4099}); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("update missing egress error = %v, want %v", err, ErrKeyNotFound)
+	}
+}
+
+func TestEgressDeleteReferencedByDomainRule(t *testing.T) {
+	d := newTestDao(t)
+	if err := d.CreateEgress(Egress{Name: "proxy-a", FwMark: 4097}); err != nil {
+		t.Fatalf("create egress: %v", err)
+	}
+	dr := DomainRule{Match: router.MatchFullDomain, Domain: "example.com", Egress: "proxy-a"}
+	if err := d.SetDomainRule(dr); err != nil {
+		t.Fatalf("set domain rule: %v", err)
+	}
+
+	if err := d.DeleteEgress("proxy-a"); !errors.Is(err, ErrEgressInUse) {
+		t.Fatalf("delete referenced egress error = %v, want %v", err, ErrEgressInUse)
+	}
+
+	if err := d.DeleteDomainRule(dr.Match, dr.Domain); err != nil {
+		t.Fatalf("delete domain rule: %v", err)
+	}
+	if err := d.DeleteEgress("proxy-a"); err != nil {
+		t.Fatalf("delete egress: %v", err)
+	}
+	if err := d.DeleteEgress("proxy-a"); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("delete missing egress error = %v, want %v", err, ErrKeyNotFound)
 	}
 }

@@ -43,39 +43,25 @@ func (ctl *controller) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 // 依次尝试从 ctl.dnsServers 中解析 dns：任一上游返回成功且带有应答记录即采用，
 // 否则回退到下一个上游。全部上游都失败时返回 SERVFAIL。
 func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) bool {
+	cacheKey, cacheable := dnsCacheKey(r)
+	if cacheable {
+		if response, ok := ctl.getCachedDNSResponse(cacheKey, r); ok {
+			ctl.writeDNSResponse(w, r, response)
+			ctl.dnsQuerySucceed().Inc()
+			return true
+		}
+	}
+
 	for _, srv := range ctl.dnsServers {
 		resp, _, err := srv.Query(ctx, r)
 		if err != nil || resp == nil {
 			continue
 		}
 		if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
-			nameip := make(map[string][]netip.Addr)
-			for _, rr := range resp.Answer {
-				var val netip.Addr
-				header := rr.Header()
-				switch r := rr.(type) {
-				case *dns.A:
-					val, err = netip.ParseAddr(r.A.String())
-					if err != nil {
-						slog.Warn("ParseAddr A", "err", err)
-					}
-				case *dns.AAAA:
-					val, err = netip.ParseAddr(r.AAAA.String())
-					if err != nil {
-						slog.Warn("ParseAddr A", "err", err)
-					}
-				}
-				if val.IsValid() {
-					nameip[header.Name] = append(nameip[header.Name], val)
-					slog.Debug("resolv dns", "ip", val, "name", header.Name)
-				}
+			if cacheable {
+				ctl.cacheDNSResponse(cacheKey, resp)
 			}
-			for name, ips := range nameip {
-				ctl.dnsToRoute(name, ips...)
-			}
-			if err := resp.Pack(); err == nil {
-				_, _ = io.Copy(w, resp)
-			}
+			ctl.writeDNSResponse(w, r, resp)
 			ctl.dnsQuerySucceed().Inc()
 			return true
 		}
@@ -89,6 +75,31 @@ func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 		_, _ = io.Copy(w, resp)
 	}
 	return false
+}
+
+func (ctl *controller) writeDNSResponse(w dns.ResponseWriter, request, response *dns.Msg) {
+	nameip := make(map[string][]netip.Addr)
+	for _, rr := range response.Answer {
+		var value netip.Addr
+		header := rr.Header()
+		switch record := rr.(type) {
+		case *dns.A:
+			value = record.A.Addr
+		case *dns.AAAA:
+			value = record.AAAA.Addr
+		}
+		if value.IsValid() {
+			nameip[header.Name] = append(nameip[header.Name], value)
+			slog.Debug("resolve dns", "ip", value, "name", header.Name)
+		}
+	}
+	for name, ips := range nameip {
+		ctl.dnsToRoute(name, ips...)
+	}
+	response.ID = request.ID
+	if err := response.Pack(); err == nil {
+		_, _ = io.Copy(w, response)
+	}
 }
 
 func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, server netip.AddrPort) {
@@ -154,6 +165,7 @@ func (ctl *controller) addIRoute(fwmark uint32, ips ...netip.Addr) {
 		if !ip.Is4() {
 			continue
 		}
+		ctl.routeMux.Lock()
 		oldFwmark, ok := ctl.routeTable.Lookup(ip)
 		if !ok || oldFwmark != fwmark {
 			ctl.routeTable.Insert(netip.PrefixFrom(ip, 32), fwmark)
@@ -161,6 +173,7 @@ func (ctl *controller) addIRoute(fwmark uint32, ips ...netip.Addr) {
 			fwmarts = append(fwmarts, fwmark)
 			slog.Debug("add route", "ip", ip, "fwmark", fwmark, "raw", ip.As4())
 		}
+		ctl.routeMux.Unlock()
 	}
 	if len(updateIps) == 0 {
 		return
@@ -185,8 +198,20 @@ func loadHostsFromStorage(db *dao.Dao, hosts map[string]netip.Addr) error {
 }
 
 func loadDomainRuleMapFromStorage(db *dao.Dao, routerMap map[string]uint64) error {
+	fwmarkByEgress := make(map[string]uint32)
+	if err := db.EgressIterator(func(egress dao.Egress) error {
+		fwmarkByEgress[egress.Name] = egress.FwMark
+		return nil
+	}); err != nil {
+		return err
+	}
 	return db.DomainRuleIterator(func(dr dao.DomainRule) error {
-		routerMap[router.ReverseDomainString(dr.Domain)] = router.RouteDest(uint32(dr.Match), dr.Fwmark)
+		fwmark, ok := fwmarkByEgress[dr.Egress]
+		if !ok {
+			slog.Error("domain references missing egress", "match", dr.Match, "domain", dr.Domain, "egress", dr.Egress)
+			return nil
+		}
+		routerMap[router.ReverseDomainString(dr.Domain)] = router.RouteDest(uint32(dr.Match), fwmark)
 		return nil
 	})
 }

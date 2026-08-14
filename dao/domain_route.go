@@ -2,7 +2,6 @@ package dao
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 
 	"github.com/lyp256/gateway/dns/router"
@@ -13,7 +12,7 @@ import (
 type DomainRule struct {
 	Match  router.MatchType `json:"match"`
 	Domain string           `json:"domain"`
-	Fwmark uint32           `json:"fwmark"`
+	Egress string           `json:"egress"`
 }
 
 func ParseDomainRuleKey[T string | []byte](key T) (uint32, T) {
@@ -35,9 +34,11 @@ func marshalDomainRuleKey(match router.MatchType, domain string) []byte {
 func (d *Dao) SetDomainRule(dr DomainRule) error {
 	key := marshalDomainRuleKey(dr.Match, dr.Domain)
 	return d.db.Update(func(tx *bbolt.Tx) error {
-		val := make([]byte, 4)
-		binary.BigEndian.PutUint32(val, dr.Fwmark)
-		return tx.Bucket(bucketName).Put(key, val)
+		bucket := tx.Bucket(bucketName)
+		if bucket.Get(marshalEgressKey(dr.Egress)) == nil {
+			return fmt.Errorf("%w: %s", ErrEgressNotFound, dr.Egress)
+		}
+		return bucket.Put(key, []byte(dr.Egress))
 	})
 }
 
@@ -49,10 +50,7 @@ func (d *Dao) GetDomainRule(match router.MatchType, domain string) (DomainRule, 
 		if v == nil {
 			return ErrKeyNotFound
 		}
-		if len(v) != 4 {
-			return fmt.Errorf("invalid value")
-		}
-		dr.Fwmark = binary.BigEndian.Uint32(v)
+		dr.Egress = string(v)
 		return nil
 	})
 	if err != nil {
@@ -78,10 +76,7 @@ func (d *Dao) DomainRuleIterator(fn func(dr DomainRule) error) error {
 				Match:  router.MatchType(match),
 				Domain: domain,
 			}
-			if len(v) != 4 {
-				return fmt.Errorf("invalid value")
-			}
-			dr.Fwmark = binary.BigEndian.Uint32(v)
+			dr.Egress = string(v)
 			if err := fn(dr); err != nil {
 				return err
 			}

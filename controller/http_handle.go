@@ -15,12 +15,15 @@ import (
 )
 
 func (ctl *controller) getRouteTableTree(ctx context.Context, _ *struct{}) (*schema.Body[[]bart.DumpListNode[uint32]], error) {
+	ctl.routeMux.RLock()
+	defer ctl.routeMux.RUnlock()
 	routes := ctl.routeTable.DumpList4()
 	return schema.NewBody(routes), nil
 }
 
 func (ctl *controller) getRouteTables(ctx context.Context, _ *struct{}) (*schema.Body[[]schema.RouteTableItem], error) {
 	res := make([]schema.RouteTableItem, 0, 0)
+	ctl.routeMux.RLock()
 	ctl.routeTable.AllSorted4()(func(cidr netip.Prefix, v uint32) bool {
 		res = append(res, schema.RouteTableItem{
 			CIDR:  cidr,
@@ -28,6 +31,7 @@ func (ctl *controller) getRouteTables(ctx context.Context, _ *struct{}) (*schema
 		})
 		return true
 	})
+	ctl.routeMux.RUnlock()
 	return schema.NewBody(res), nil
 }
 
@@ -39,12 +43,61 @@ func (ctl *controller) getDomainRules(ctx context.Context, _ *struct{}) (*schema
 	return schema.NewBody(list), nil
 }
 
-func (ctl *controller) setDomainRule(ctx context.Context, in *schema.Body[dao.DomainRule]) (*schema.Body[dao.DomainRule], error) {
-	err := ctl.storage.SetDomainRule(in.Body)
+func (ctl *controller) getCidrRules(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.CidrRule], error) {
+	list, err := ctl.storage.ListCidrRule()
 	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(list), nil
+}
+
+func (ctl *controller) setCidrRule(ctx context.Context, in *schema.Body[dao.CidrRule]) (*schema.Body[dao.CidrRule], error) {
+	prefix, err := dao.NormalizeCidr(in.Body.Cidr)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	in.Body.Cidr = prefix.String()
+	egress, err := ctl.storage.GetEgress(in.Body.Egress)
+	if err != nil {
+		return nil, egressError(err)
+	}
+	if err := ctl.storage.SetCidrRule(in.Body); err != nil {
+		if errors.Is(err, dao.ErrEgressNotFound) {
+			return nil, huma.NewError(http.StatusNotFound, "egress not found")
+		}
 		return nil, huma.NewError(500, "create data", err)
 	}
-	ctl.dnsTable.Set(in.Body.Domain, in.Body.Match, in.Body.Fwmark)
+	ctl.setCidrRoute(prefix, egress.FwMark)
+	return schema.NewBody(in.Body), nil
+}
+
+func (ctl *controller) deleteCidrRule(ctx context.Context, i *struct {
+	Cidr string `path:"cidr"`
+}) (*struct{}, error) {
+	prefix, err := dao.NormalizeCidr(i.Cidr)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	if err := ctl.storage.DeleteCidrRule(prefix.String()); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	ctl.deleteCidrRoute(prefix)
+	return nil, nil
+}
+
+func (ctl *controller) setDomainRule(ctx context.Context, in *schema.Body[dao.DomainRule]) (*schema.Body[dao.DomainRule], error) {
+	egress, err := ctl.storage.GetEgress(in.Body.Egress)
+	if err != nil {
+		return nil, egressError(err)
+	}
+	err = ctl.storage.SetDomainRule(in.Body)
+	if err != nil {
+		if errors.Is(err, dao.ErrEgressNotFound) {
+			return nil, huma.NewError(http.StatusNotFound, "egress not found")
+		}
+		return nil, huma.NewError(500, "create data", err)
+	}
+	ctl.dnsTable.Set(in.Body.Domain, in.Body.Match, egress.FwMark)
 	return schema.NewBody(in.Body), nil
 }
 
@@ -76,6 +129,10 @@ func (ctl *controller) getHosts(ctx context.Context, _ *struct{}) (*schema.Body[
 	return schema.NewBody(list), nil
 }
 
+func (ctl *controller) getDNSCache(ctx context.Context, _ *struct{}) (*schema.Body[[]schema.DNSCacheEntry], error) {
+	return schema.NewBody(ctl.dnsCacheSnapshot()), nil
+}
+
 func (ctl *controller) setHosts(ctx context.Context, in *schema.Body[dao.Host]) (*schema.Body[dao.Host], error) {
 	err := ctl.storage.SetHost(in.Body.Name, in.Body.IP)
 	if err != nil {
@@ -84,19 +141,21 @@ func (ctl *controller) setHosts(ctx context.Context, in *schema.Body[dao.Host]) 
 	ctl.hostsMux.Lock()
 	ctl.hosts[in.Body.Name] = in.Body.IP
 	ctl.hostsMux.Unlock()
+	ctl.dnsCache.Remove(in.Body.Name)
 	return schema.NewBody(in.Body), nil
 }
 
 func (ctl *controller) deleteHosts(ctx context.Context, in *struct {
-	Host string `path:"host"`
+	Name string `path:"host_name"`
 }) (*struct{}, error) {
-	err := ctl.storage.DeleteHost(in.Host)
+	err := ctl.storage.DeleteHost(in.Name)
 	if err != nil {
 		return nil, huma.NewError(http.StatusInternalServerError, "", err)
 	}
 	ctl.hostsMux.Lock()
-	delete(ctl.hosts, in.Host)
+	delete(ctl.hosts, in.Name)
 	ctl.hostsMux.Unlock()
+	ctl.dnsCache.Remove(in.Name)
 	return nil, nil
 }
 
@@ -113,10 +172,7 @@ func (ctl *controller) getEgress(ctx context.Context, in *struct {
 }) (*schema.Body[dao.Egress], error) {
 	tun, err := ctl.storage.GetEgress(in.Name)
 	if err != nil {
-		if errors.Is(err, dao.ErrKeyNotFound) {
-			return nil, huma.NewError(http.StatusNotFound, "egress not found")
-		}
-		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+		return nil, egressError(err)
 	}
 	return schema.NewBody(tun), nil
 }
@@ -150,6 +206,10 @@ func egressError(err error) error {
 		return huma.Error409Conflict("egress name already exists")
 	case errors.Is(err, dao.ErrEgressFwMarkExists):
 		return huma.Error409Conflict("egress fwmark already exists")
+	case errors.Is(err, dao.ErrEgressInUse):
+		return huma.Error409Conflict("egress is referenced by domain rules")
+	case errors.Is(err, dao.ErrEgressNotFound):
+		return huma.Error404NotFound("egress not found")
 	case errors.Is(err, dao.ErrKeyNotFound):
 		return huma.Error404NotFound("egress not found")
 	default:
@@ -161,7 +221,7 @@ func (ctl *controller) deleteEgress(ctx context.Context, in *struct {
 	Name string `path:"name"`
 }) (*struct{}, error) {
 	if err := ctl.storage.DeleteEgress(in.Name); err != nil {
-		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+		return nil, egressError(err)
 	}
 	return nil, nil
 }

@@ -13,6 +13,8 @@ import (
 var (
 	ErrEgressNameExists   = errors.New("egress name already exists")
 	ErrEgressFwMarkExists = errors.New("egress fwmark already exists")
+	ErrEgressNotFound     = errors.New("egress not found")
+	ErrEgressInUse        = errors.New("egress is referenced by rules")
 )
 
 type EgressType string
@@ -38,7 +40,7 @@ type Egress struct {
 
 // marshalEgressKey 组装存储 key：PrefixTunnel + Egress name。
 func marshalEgressKey(name string) []byte {
-	return sconv.ByteSlice(MarshalKey(PrefixTunnel, name))
+	return sconv.ByteSlice(MarshalKey(PrefixEgress, name))
 }
 
 func (d *Dao) CreateEgress(egress Egress) error {
@@ -63,7 +65,7 @@ func (d *Dao) storeEgress(egress Egress, mustExist bool) error {
 			return ErrKeyNotFound
 		}
 
-		prefix := sconv.ByteSlice(PrefixTunnel)
+		prefix := sconv.ByteSlice(PrefixEgress)
 		cursor := bucket.Cursor()
 		for otherKey, otherValue := cursor.Seek(prefix); otherKey != nil && bytes.HasPrefix(otherKey, prefix); otherKey, otherValue = cursor.Next() {
 			if bytes.Equal(otherKey, key) {
@@ -88,7 +90,7 @@ func (d *Dao) GetEgress(name string) (Egress, error) {
 	err := d.db.View(func(tx *bbolt.Tx) error {
 		value := tx.Bucket(bucketName).Get(key)
 		if value == nil {
-			return ErrKeyNotFound
+			return ErrEgressNotFound
 		}
 		return json.Unmarshal(value, &tun)
 	})
@@ -101,12 +103,25 @@ func (d *Dao) GetEgress(name string) (Egress, error) {
 func (d *Dao) DeleteEgress(name string) error {
 	key := marshalEgressKey(name)
 	return d.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket(bucketName).Delete(key)
+		bucket := tx.Bucket(bucketName)
+		if bucket.Get(key) == nil {
+			return ErrKeyNotFound
+		}
+		for _, prefix := range []string{PrefixDomainRule, PrifixCidr} {
+			keyPrefix := sconv.ByteSlice(prefix)
+			cursor := bucket.Cursor()
+			for ruleKey, ruleValue := cursor.Seek(keyPrefix); ruleKey != nil && bytes.HasPrefix(ruleKey, keyPrefix); ruleKey, ruleValue = cursor.Next() {
+				if string(ruleValue) == name {
+					return fmt.Errorf("%w: %s", ErrEgressInUse, name)
+				}
+			}
+		}
+		return bucket.Delete(key)
 	})
 }
 
 func (d *Dao) EgressIterator(fn func(egress Egress) error) error {
-	prefix := sconv.ByteSlice(PrefixTunnel)
+	prefix := sconv.ByteSlice(PrefixEgress)
 	return d.db.View(func(tx *bbolt.Tx) error {
 		cursor := tx.Bucket(bucketName).Cursor()
 		for key, value := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, value = cursor.Next() {

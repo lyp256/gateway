@@ -576,7 +576,7 @@ operations
 | GET | `/api/v1/operations/{id}` | 异步应用结果 |
 | GET | `/metrics` | Prometheus 指标 |
 
-兼容当前 API 时，`DomainRule.Fwmark` 可以暂时保留，但新客户端应使用 `egress` 引用。服务端必须拒绝不存在的 egress、无效域名、非法 CIDR、mark/table 冲突和不允许的系统范围配置。
+当前 `DomainRule` 直接使用 `egress` 引用，fwmark 由控制器在加载和写入时解析。服务端必须拒绝不存在的 egress、无效域名、非法 CIDR、mark/table 冲突和不允许的系统范围配置。
 
 API 安全基线：
 

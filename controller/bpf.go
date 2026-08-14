@@ -42,9 +42,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 		}
 		defer clear()
 	} else {
-		for _, name := range ctl.netDevs {
-			iface, err := netlink.LinkByName(name)
-			if err != nil {
+	for _, name := range ctl.netDevs {
+		iface, err := netlink.LinkByName(name)
+		if err != nil {
 				return err
 			}
 			clear, err := mountEbpfProg(iface, ctl.bpf.TcGatewayFilter.FD())
@@ -54,6 +54,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 			defer clear()
 		}
 	}
+
+	// 将持久化的显式 IP/CIDR 规则同步到 eBPF LPM map
+	ctl.syncRoutesToBPF()
 
 	return ctl.handleEvent(ctx)
 }

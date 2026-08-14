@@ -29,6 +29,8 @@ func (ctl *controller) initMetrics() {
 		return float64(len(ctl.dnsServers))
 	})
 	ctl.metricsSet.NewGauge(metricsBpfRouteTotal, func() float64 {
+		ctl.routeMux.RLock()
+		defer ctl.routeMux.RUnlock()
 		return float64(ctl.routeTable.Size4())
 	})
 }

@@ -26,10 +26,16 @@ func (ctl *controller) registerHttpAPI() {
 	huma.Get(hapi, apiV1("/domains"), ctl.getDomainRules)
 	huma.Put(hapi, apiV1("/domains"), ctl.setDomainRule)
 	huma.Delete(hapi, apiV1("/domains/{matchDomain}"), ctl.deleteDomainRule)
+	// 显式 IP/CIDR 路由规则
+	huma.Get(hapi, apiV1("/cidrs"), ctl.getCidrRules)
+	huma.Put(hapi, apiV1("/cidrs"), ctl.setCidrRule)
+	huma.Delete(hapi, apiV1("/cidrs/{cidr}"), ctl.deleteCidrRule)
 	// 静态 dns host 解析
 	huma.Get(hapi, apiV1("/hosts"), ctl.getHosts)
 	huma.Put(hapi, apiV1("/hosts"), ctl.setHosts)
-	huma.Delete(hapi, apiV1("/hosts/{host}"), ctl.deleteHosts)
+	huma.Delete(hapi, apiV1("/hosts/{host_name}"), ctl.deleteHosts)
+	// DNS 解析缓存
+	huma.Get(hapi, apiV1("/dns/cache"), ctl.getDNSCache)
 	// egress 配置
 	huma.Get(hapi, apiV1("/egresses"), ctl.getEgresses)
 	huma.Get(hapi, apiV1("/egresses/{name}"), ctl.getEgress)

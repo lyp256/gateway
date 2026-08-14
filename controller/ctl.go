@@ -11,6 +11,7 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/gaissmai/bart"
 	"github.com/go-chi/chi/v5"
+	"github.com/hashicorp/golang-lru/v2"
 	"github.com/lyp256/gateway/bpf"
 	"github.com/lyp256/gateway/dao"
 
@@ -37,6 +38,7 @@ func NewController(storage *dao.Dao, dnsServers []query.DNSQuerier, e chi.Router
 		hostsMux:   mux,
 		hosts:      hosts,
 		dnsServers: dnsServers,
+		dnsCache:   newDNSCache(),
 		http:       e,
 		waitReadCh: make(chan struct{}),
 		storage:    storage,
@@ -55,8 +57,12 @@ type controller struct {
 	hosts map[string]netip.Addr
 	// 上游dns 服务
 	dnsServers []query.DNSQuerier
+	// Recently resolved DNS responses, bounded by dnsCacheSize.
+	dnsCache *lru.Cache[string, dnsCacheEntry]
 	// ebpf 路由表
 	routeTable bart.Table[uint32]
+	// 保护 routeTable 的并发读写（DNS 解析与 IP 规则管理可能同时进行）
+	routeMux sync.RWMutex
 	// dns 路由表
 	dnsTable router.Router
 
@@ -92,6 +98,10 @@ func (ctl *controller) Run(ctx context.Context) error {
 		return err
 	}
 	ctl.dnsTable = router.NewMemoryMap(routeMap)
+	err = loadCidrRuleMapFromStorage(&ctl.routeTable, ctl.storage)
+	if err != nil {
+		return err
+	}
 
 	errCh := make(chan error)
 	go func() {

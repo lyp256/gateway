@@ -48,14 +48,18 @@ function emptyEgress() {
 }
 
 function emptyDomain() {
-  return { match: 'domain', domain: '', fwmark: '' }
+  return { match: 'domain', domain: '', egress: '' }
+}
+
+function emptyCidr() {
+  return { cidr: '', egress: '' }
 }
 
 function emptyHost() {
   return { name: '', ip: '' }
 }
 
-const viewIds = new Set(['overview', 'egresses', 'domains', 'hosts', 'routes'])
+const viewIds = new Set(['overview', 'egresses', 'domains', 'cidrs', 'hosts', 'routes', 'dns-cache'])
 
 function viewFromHash(hash = window.location.hash) {
   const view = hash.replace(/^#\/?/, '').split(/[/?]/, 1)[0]
@@ -98,29 +102,36 @@ const App = {
     const editing = ref(null)
     const egressForm = reactive(emptyEgress())
     const domainForm = reactive(emptyDomain())
+    const cidrForm = reactive(emptyCidr())
     const hostForm = reactive(emptyHost())
-    const data = reactive({ egresses: [], domains: [], hosts: [], routes: [] })
+    const data = reactive({ egresses: [], domains: [], cidrs: [], hosts: [], routes: [], dnsCache: [] })
 
     const navItems = [
       { id: 'overview', label: '总览', icon: 'Activity' },
       { id: 'egresses', label: '出口', icon: 'Network' },
       { id: 'domains', label: '域名规则', icon: 'Globe2' },
+      { id: 'cidrs', label: 'IP 规则', icon: 'Network' },
       { id: 'hosts', label: '静态 Hosts', icon: 'Server' },
       { id: 'routes', label: '生效路由', icon: 'Route' },
+      { id: 'dns-cache', label: 'DNS 缓存', icon: 'Database' },
     ]
 
     const stats = computed(() => [
       { label: '出口配置', value: data.egresses.length, icon: Network, tone: 'teal' },
       { label: '域名规则', value: data.domains.length, icon: Globe2, tone: 'lime' },
+      { label: 'IP 规则', value: data.cidrs.length, icon: Network, tone: 'indigo' },
       { label: '静态 Hosts', value: data.hosts.length, icon: Server, tone: 'amber' },
       { label: 'IPv4 路由', value: data.routes.length, icon: Route, tone: 'rose' },
     ])
 
     const egressByMark = computed(() => new Map(data.egresses.map((item) => [Number(item.fwmark), item])))
-    const selectedDomainEgress = computed(() => egressByMark.value.get(Number(domainForm.fwmark)))
+    const egressByName = computed(() => new Map(data.egresses.map((item) => [item.name, item])))
+    const selectedDomainEgress = computed(() => egressByName.value.get(domainForm.egress))
+    const selectedCidrEgress = computed(() => egressByName.value.get(cidrForm.egress))
     const modalTitle = computed(() => ({
       egress: editing.value ? '编辑出口' : '新建出口',
       domain: editing.value ? '编辑域名规则' : '新建域名规则',
+      cidr: editing.value ? '编辑 IP 规则' : '新建 IP 规则',
       host: editing.value ? '编辑静态 Hosts' : '新建静态 Hosts',
     })[modal.value] || '')
 
@@ -151,13 +162,15 @@ const App = {
       clearMessage()
       loading.value = true
       try {
-        const [egresses, domains, hosts, routes] = await Promise.all([
-          api('/egresses'), api('/domains'), api('/hosts'), api('/routes'),
+        const [egresses, domains, cidrs, hosts, routes, dnsCache] = await Promise.all([
+          api('/egresses'), api('/domains'), api('/cidrs'), api('/hosts'), api('/routes'), api('/dns/cache'),
         ])
         data.egresses = Array.isArray(egresses) ? egresses : []
         data.domains = Array.isArray(domains) ? domains : []
+        data.cidrs = Array.isArray(cidrs) ? cidrs : []
         data.hosts = Array.isArray(hosts) ? hosts : []
         data.routes = Array.isArray(routes) ? routes : []
+        data.dnsCache = Array.isArray(dnsCache) ? dnsCache : []
         lastUpdated.value = new Date()
       } catch (cause) {
         error.value = cause.message
@@ -184,9 +197,17 @@ const App = {
     function openDomain(item) {
       editing.value = item || null
       resetForm(domainForm, item ? {
-        match: item.match || 'domain', domain: item.domain, fwmark: item.fwmark,
+        match: item.match || 'domain', domain: item.domain, egress: item.egress,
       } : emptyDomain())
       modal.value = 'domain'
+    }
+
+    function openCidr(item) {
+      editing.value = item || null
+      resetForm(cidrForm, item ? {
+        cidr: item.cidr, egress: item.egress,
+      } : emptyCidr())
+      modal.value = 'cidr'
     }
 
     function openHost(item) {
@@ -249,10 +270,34 @@ const App = {
       try {
         await api('/domains', {
           method: 'PUT',
-          body: JSON.stringify({ match: domainForm.match, domain, fwmark: Number(egress.fwmark) }),
+          body: JSON.stringify({ match: domainForm.match, domain, egress: domainForm.egress }),
         })
         closeModal()
         notice.value = '域名规则已保存。'
+        await refresh()
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        saving.value = false
+      }
+    }
+
+    async function saveCidr() {
+      const cidr = cidrForm.cidr.trim()
+      const egress = selectedCidrEgress.value
+      if (!cidr || !egress) {
+        error.value = '请填写 CIDR 网段并选择已有出口。'
+        return
+      }
+      saving.value = true
+      clearMessage()
+      try {
+        await api('/cidrs', {
+          method: 'PUT',
+          body: JSON.stringify({ cidr, egress: cidrForm.egress }),
+        })
+        closeModal()
+        notice.value = 'IP 规则已保存。'
         await refresh()
       } catch (cause) {
         error.value = cause.message
@@ -285,8 +330,8 @@ const App = {
     }
 
     async function remove(kind, item) {
-      const labels = { egress: '出口', domain: '域名规则', host: '静态 Hosts' }
-      const identifier = kind === 'domain' ? item.domain : item.name
+      const labels = { egress: '出口', domain: '域名规则', cidr: 'IP 规则', host: '静态 Hosts' }
+      const identifier = kind === 'domain' ? item.domain : kind === 'cidr' ? item.cidr : item.name
       if (!window.confirm(`确认删除${labels[kind]}「${identifier}」？`)) return
       clearMessage()
       try {
@@ -294,7 +339,9 @@ const App = {
           ? `/egresses/${encodeURIComponent(item.name)}`
           : kind === 'domain'
             ? `/domains/${encodeURIComponent(`${item.match}:${item.domain}`)}`
-            : `/hosts/${encodeURIComponent(item.name)}`
+            : kind === 'cidr'
+              ? `/cidrs/${encodeURIComponent(item.cidr)}`
+              : `/hosts/${encodeURIComponent(item.name)}`
         await api(path, { method: 'DELETE' })
         notice.value = `${labels[kind]}已删除。`
         await refresh()
@@ -306,11 +353,12 @@ const App = {
     function addForView() {
       if (currentView.value === 'egresses') openEgress()
       if (currentView.value === 'domains') openDomain()
+      if (currentView.value === 'cidrs') openCidr()
       if (currentView.value === 'hosts') openHost()
     }
 
-    const addLabel = computed(() => ({ egresses: '新建出口', domains: '新建规则', hosts: '新建 Hosts' })[currentView.value] || '')
-    const canAdd = computed(() => ['egresses', 'domains', 'hosts'].includes(currentView.value))
+    const addLabel = computed(() => ({ egresses: '新建出口', domains: '新建规则', cidrs: '新建 IP 规则', hosts: '新建 Hosts' })[currentView.value] || '')
+    const canAdd = computed(() => ['egresses', 'domains', 'cidrs', 'hosts'].includes(currentView.value))
 
     onMounted(() => {
       syncViewFromHash()
@@ -321,10 +369,10 @@ const App = {
     onBeforeUnmount(() => window.removeEventListener('hashchange', syncViewFromHash))
 
     return {
-      addForView, addLabel, canAdd, closeModal, currentView, data, domainForm, egressForm,
-      egressByMark, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
-      navigate, openDomain, openEgress, openHost, refresh, remove, saveDomain, saveEgress, saveHost,
-      saving, selectedDomainEgress, stats,
+      addForView, addLabel, canAdd, cidrForm, closeModal, currentView, data, domainForm, egressForm,
+      egressByMark, egressByName, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
+      navigate, openCidr, openDomain, openEgress, openHost, refresh, remove, saveCidr, saveDomain, saveEgress, saveHost,
+      saving, selectedCidrEgress, selectedDomainEgress, stats,
     }
   },
   template: `
@@ -387,10 +435,17 @@ const App = {
                 </div>
                 <div v-else class="empty-inline"><Route :size="19" />尚无动态 IPv4 路由</div>
               </section>
+              <section class="panel-list">
+                <div class="section-heading"><div><p class="eyebrow">IP ROUTING</p><h2>最近 IP 规则</h2></div><button class="text-button" @click="navigate('cidrs')">查看全部 <ArrowUpRight :size="16" /></button></div>
+                <div v-if="data.cidrs.length" class="compact-list">
+                  <div v-for="cidr in data.cidrs.slice(0, 4)" :key="cidr.cidr" class="compact-row"><code>{{ cidr.cidr }}</code><span class="row-name">{{ cidr.egress }}</span></div>
+                </div>
+                <div v-else class="empty-inline"><Network :size="19" />尚无显式 IP 规则</div>
+              </section>
             </div>
             <section class="guidance">
               <CircleHelp :size="20" />
-              <p>域名规则在 DNS 响应中命中后会写入当前 IPv4 路由快照。出口配置当前保存 fwmark 与隧道参数，策略路由和隧道生命周期由后端后续接管。</p>
+              <p>域名规则在 DNS 响应命中后写入当前 IPv4 路由快照；IP 规则直接按 CIDR 网段生效，不依赖 DNS 解析。出口配置当前保存 fwmark 与隧道参数，策略路由和隧道生命周期由后端后续接管。</p>
             </section>
           </section>
 
@@ -402,8 +457,14 @@ const App = {
 
           <section v-else-if="currentView === 'domains'" class="view">
             <div class="section-heading"><div><p class="eyebrow">DNS ROUTING</p><h2>域名规则</h2></div><span class="item-count">{{ data.domains.length }} 项</span></div>
-            <div v-if="data.domains.length" class="table-wrap"><table><thead><tr><th>域名</th><th>匹配方式</th><th>出口</th><th>fwmark</th><th></th></tr></thead><tbody><tr v-for="item in data.domains" :key="item.match + item.domain"><td class="row-name">{{ item.domain }}</td><td><span class="badge badge-lime">{{ item.match === 'full' ? '精确匹配' : '域及子域' }}</span></td><td>{{ egressByMark.get(Number(item.fwmark))?.name || '-' }}</td><td><code>{{ hexMark(item.fwmark) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openDomain(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('domain', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-if="data.domains.length" class="table-wrap"><table><thead><tr><th>域名</th><th>匹配方式</th><th>出口</th><th>fwmark</th><th></th></tr></thead><tbody><tr v-for="item in data.domains" :key="item.match + item.domain"><td class="row-name">{{ item.domain }}</td><td><span class="badge badge-lime">{{ item.match === 'full' ? '精确匹配' : '域及子域' }}</span></td><td>{{ item.egress || '-' }}</td><td><code>{{ hexMark(egressByName.get(item.egress)?.fwmark) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openDomain(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('domain', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
             <div v-else class="empty-state"><Globe2 :size="28" /><h2>还没有域名规则</h2><button class="primary-button" @click="openDomain()"><Plus :size="18" />新建规则</button></div>
+          </section>
+
+          <section v-else-if="currentView === 'cidrs'" class="view">
+            <div class="section-heading"><div><p class="eyebrow">IP ROUTING</p><h2>IP 规则</h2></div><span class="item-count">{{ data.cidrs.length }} 项</span></div>
+            <div v-if="data.cidrs.length" class="table-wrap"><table><thead><tr><th>CIDR 网段</th><th>出口</th><th>fwmark</th><th></th></tr></thead><tbody><tr v-for="item in data.cidrs" :key="item.cidr"><td class="row-name"><code>{{ item.cidr }}</code></td><td>{{ item.egress || '-' }}</td><td><code>{{ hexMark(egressByName.get(item.egress)?.fwmark) }}</code></td><td class="actions"><button class="icon-button" title="编辑规则" @click="openCidr(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除规则" @click="remove('cidr', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-else class="empty-state"><Network :size="28" /><h2>还没有 IP 规则</h2><button class="primary-button" @click="openCidr()"><Plus :size="18" />新建 IP 规则</button></div>
           </section>
 
           <section v-else-if="currentView === 'hosts'" class="view">
@@ -417,11 +478,17 @@ const App = {
             <div v-if="data.routes.length" class="table-wrap"><table><thead><tr><th>CIDR</th><th>fwmark</th><th>关联出口</th></tr></thead><tbody><tr v-for="item in data.routes" :key="item.cidr"><td><code>{{ item.cidr }}</code></td><td><code>{{ hexMark(item.value) }}</code></td><td>{{ egressByMark.get(Number(item.value))?.name || '-' }}</td></tr></tbody></table></div>
             <div v-else class="empty-state"><Route :size="28" /><h2>当前没有动态 IPv4 路由</h2></div>
           </section>
+
+          <section v-else-if="currentView === 'dns-cache'" class="view">
+            <div class="section-heading"><div><p class="eyebrow">RESOLVER CACHE</p><h2>DNS 解析缓存</h2></div><span class="item-count">{{ data.dnsCache.length }} 项</span></div>
+            <div v-if="data.dnsCache.length" class="table-wrap"><table><thead><tr><th>域名</th><th>类型</th><th>解析结果</th><th>剩余 TTL</th><th>过期时间</th></tr></thead><tbody><tr v-for="item in data.dnsCache" :key="item.name + item.type"><td class="row-name">{{ item.name }}</td><td><span class="badge badge-teal">{{ item.type }}</span></td><td class="dns-answers"><code v-for="answer in item.answers" :key="answer">{{ answer }}</code></td><td><code>{{ item.ttl }}s</code></td><td class="muted">{{ new Date(item.expiresAt).toLocaleString('zh-CN', { hour12: false }) }}</td></tr></tbody></table></div>
+            <div v-else class="empty-state"><Database :size="28" /><h2>尚无有效 DNS 缓存</h2></div>
+          </section>
         </template>
       </section>
 
       <div v-if="modal" class="modal-backdrop" @mousedown.self="closeModal">
-        <form class="modal" @submit.prevent="modal === 'egress' ? saveEgress() : modal === 'domain' ? saveDomain() : saveHost()">
+        <form class="modal" @submit.prevent="modal === 'egress' ? saveEgress() : modal === 'domain' ? saveDomain() : modal === 'cidr' ? saveCidr() : saveHost()">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>{{ modalTitle }}</h2></div><button type="button" class="icon-button" title="关闭" @click="closeModal"><X :size="18" /></button></header>
           <div v-if="modal === 'egress'" class="form-fields">
             <label><span>名称</span><input v-model="egressForm.name" :disabled="!!editing" required placeholder="proxy-a" /></label>
@@ -432,7 +499,11 @@ const App = {
           <div v-else-if="modal === 'domain'" class="form-fields">
             <label><span>域名</span><input v-model="domainForm.domain" :disabled="!!editing" required placeholder="example.com" /><small v-if="editing">域名与匹配方式共同构成规则标识。</small></label>
             <label><span>匹配方式</span><select v-model="domainForm.match" :disabled="!!editing"><option value="domain">域及其子域</option><option value="full">精确域名</option></select></label>
-            <label><span>关联出口</span><select v-model.number="domainForm.fwmark" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.fwmark">{{ item.name }} · {{ hexMark(item.fwmark) }}</option></select><small v-if="selectedDomainEgress">将使用 {{ hexMark(selectedDomainEgress.fwmark) }}</small></label>
+            <label><span>关联出口</span><select v-model="domainForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ hexMark(item.fwmark) }}</option></select><small v-if="selectedDomainEgress">将使用 {{ hexMark(selectedDomainEgress.fwmark) }}</small></label>
+          </div>
+          <div v-else-if="modal === 'cidr'" class="form-fields">
+            <label><span>CIDR 网段</span><input v-model="cidrForm.cidr" :disabled="!!editing" required placeholder="203.0.113.0/24" /><small>填写 IPv4 网段，如 203.0.113.0/24，直接按最长前缀匹配，不依赖 DNS 解析。</small></label>
+            <label><span>关联出口</span><select v-model="cidrForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ hexMark(item.fwmark) }}</option></select><small v-if="selectedCidrEgress">将使用 {{ hexMark(selectedCidrEgress.fwmark) }}</small></label>
           </div>
           <div v-else class="form-fields"><label><span>主机名</span><input v-model="hostForm.name" :disabled="!!editing" required placeholder="internal.example.com" /></label><label><span>IP 地址</span><input v-model="hostForm.ip" required placeholder="192.0.2.10 或 2001:db8::10" /></label></div>
           <footer><button type="button" class="secondary-button" @click="closeModal">取消</button><button type="submit" class="primary-button" :disabled="saving"><LoaderCircle v-if="saving" :size="17" class="spinning" /><Check v-else :size="17" />保存</button></footer>
