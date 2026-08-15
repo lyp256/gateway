@@ -577,10 +577,31 @@ operations
 | GET/PUT/DELETE | `/api/v1/hosts`、`/api/v1/hosts/{host}` | 静态 DNS |
 | GET | `/api/v1/routes` | 当前有效 IPv4/IPv6 快照及来源 |
 | GET | `/api/v1/dns/cache` | DNS 缓存/lease 摘要 |
+| DELETE | `/api/v1/dns/cache/{name}` | 按域名删除 DNS 缓存（忽略大小写与末尾点，同域名的 A/AAAA 等条目一并清除） |
 | GET | `/api/v1/operations/{id}` | 异步应用结果 |
 | GET | `/metrics` | Prometheus 指标 |
 
 当前 `DomainRule` 直接使用 `egress` 引用，fwmark 由控制器在加载和写入时解析。服务端必须拒绝不存在的 egress、无效域名、非法 CIDR、mark/table 冲突和不允许的系统范围配置。
+
+### 11.1 列表查询约定
+
+所有列表 GET 接口（`/routes`、`/domains`、`/cidrs`、`/hosts`、`/dns/servers`、`/whitelist`、`/dns/cache`、`/egresses`）统一支持以下 query 参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `page` | 页码，从 1 开始，默认 1 |
+| `per_page` | 每页条数，默认 20，上限 1000 |
+| `sort` | 排序字段，按各资源白名单校验；非法字段回退默认排序 |
+| `order` | `asc` / `desc`，默认按资源各自的默认方向 |
+| `search` | 大小写不敏感的关键字，命中资源的任意可搜索字段 |
+
+响应体保持为纯数组（当前页条目），分页元信息放在响应头：
+`X-Total-Count`（过滤后总数）、`X-Page`、`X-Per-Page`。
+`/routetree` 是层级结构，只支持 `search` 递归过滤，不做分页与排序。
+
+列表数据的搜索、排序、分页全部在内存中完成：BoltDB 只承担全量遍历（数据规模小且多为内存态），
+`controller/query.go` 的通用查询引擎负责关键字过滤、按白名单字段稳定排序和切片分页，
+避免为每种资源在存储层实现复杂查询。排序使用稳定排序并以存储顺序作为并列时的固定次序，保证分页结果确定。
 
 API 安全基线：
 

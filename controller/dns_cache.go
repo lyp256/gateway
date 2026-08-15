@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"sort"
+	"strings"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -12,9 +14,10 @@ import (
 const dnsCacheSize = 1024
 
 type dnsCacheEntry struct {
-	response  *dns.Msg
-	cachedAt  time.Time
-	expiresAt time.Time
+	response     *dns.Msg
+	cachedAt     time.Time
+	lastAccessAt time.Time
+	expiresAt    time.Time
 }
 
 func newDNSCache() *lru.Cache[string, dnsCacheEntry] {
@@ -63,13 +66,13 @@ func (ctl *controller) getCachedDNSResponse(key string, request *dns.Msg) (*dns.
 		return nil, false
 	}
 	now := time.Now()
+	entry.lastAccessAt = now
+	ctl.dnsCache.Add(key, entry)
 	if !now.Before(entry.expiresAt) {
-		ctl.dnsCache.Remove(key)
 		return nil, false
 	}
 	response, err := cloneDNSMessage(entry.response)
 	if err != nil {
-		ctl.dnsCache.Remove(key)
 		return nil, false
 	}
 	response.ID = request.ID
@@ -110,7 +113,12 @@ func (ctl *controller) cacheDNSResponse(key string, response *dns.Msg) {
 		return
 	}
 	now := time.Now()
-	ctl.dnsCache.Add(key, dnsCacheEntry{response: stored, cachedAt: now, expiresAt: now.Add(ttl)})
+	ctl.dnsCache.Add(key, dnsCacheEntry{
+		response:     stored,
+		cachedAt:     now,
+		lastAccessAt: now,
+		expiresAt:    now.Add(ttl),
+	})
 }
 
 func (ctl *controller) dnsCacheSnapshot() []schema.DNSCacheEntry {
@@ -122,23 +130,48 @@ func (ctl *controller) dnsCacheSnapshot() []schema.DNSCacheEntry {
 		if !ok {
 			continue
 		}
-		if !now.Before(entry.expiresAt) {
-			ctl.dnsCache.Remove(key)
-			continue
-		}
 		name, qtype := dnsutil.Question(entry.response)
 		answers := make([]string, 0, len(entry.response.Answer))
 		for _, answer := range entry.response.Answer {
 			answers = append(answers, answer.Data().String())
 		}
+		expired := !now.Before(entry.expiresAt)
+		var ttl uint32
+		if !expired {
+			ttl = uint32(time.Until(entry.expiresAt).Seconds())
+		}
 		entries = append(entries, schema.DNSCacheEntry{
-			Name:      name,
-			Type:      dnsutil.TypeToString(qtype),
-			Answers:   answers,
-			CachedAt:  entry.cachedAt,
-			ExpiresAt: entry.expiresAt,
-			TTL:       uint32(time.Until(entry.expiresAt).Seconds()),
+			Name:         name,
+			Type:         dnsutil.TypeToString(qtype),
+			Answers:      answers,
+			CachedAt:     entry.cachedAt,
+			LastAccessAt: entry.lastAccessAt,
+			ExpiresAt:    entry.expiresAt,
+			TTL:          ttl,
+			Expired:      expired,
 		})
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].LastAccessAt.After(entries[j].LastAccessAt)
+	})
 	return entries
+}
+
+// deleteDNSCacheByName 删除所有与 name 匹配的缓存条目（忽略大小写与末尾点）。
+// 返回是否有条目被删除。
+func (ctl *controller) deleteDNSCacheByName(name string) bool {
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	removed := false
+	for _, key := range ctl.dnsCache.Keys() {
+		entry, ok := ctl.dnsCache.Peek(key)
+		if !ok {
+			continue
+		}
+		qname, _ := dnsutil.Question(entry.response)
+		if strings.ToLower(strings.TrimSuffix(qname, ".")) == name {
+			ctl.dnsCache.Remove(key)
+			removed = true
+		}
+	}
+	return removed
 }

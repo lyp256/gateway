@@ -45,6 +45,7 @@ func (ctl *controller) registerHttpAPI() {
 	huma.Delete(hapi, apiV1("/whitelist/{cidr}"), ctl.deleteWhitelistRule)
 	// DNS 解析缓存
 	huma.Get(hapi, apiV1("/dns/cache"), ctl.getDNSCache)
+	huma.Delete(hapi, apiV1("/dns/cache/{name}"), ctl.deleteDNSCacheEntry)
 	// egress 配置
 	huma.Get(hapi, apiV1("/egresses"), ctl.getEgresses)
 	huma.Get(hapi, apiV1("/egresses/{name}"), ctl.getEgress)
