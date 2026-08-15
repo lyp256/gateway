@@ -19,6 +19,7 @@
 
 #define MAX_HOSTNAME_LEN 253
 #define MAX_EGRESS_RULES 256
+#define MAX_WHITELIST_ENTRIES 65536
 
 // egress 规则类型：route_lpm_map 只存 8 位 egress 索引，
 // 具体处理方式（打 fwmark 或 tproxy）由 egress_map 决定。
@@ -116,6 +117,25 @@ struct tcphdr
     __be16 urg_ptr;
 };
 
+struct udphdr
+{
+    __be16 source;
+    __be16 dest;
+    __be16 len;
+    __sum16 check;
+};
+
+// DNS 重定向目标：由控制面写入 dns_redirect_map（单槽 ARRAY map）。
+// addr/port 是控制面 DNS server 的本地监听地址/端口（网络字节序），
+// enabled 为 0 时表示不启用 DNS 拦截。
+struct dns_redirect_target
+{
+    __u8 addr[4]; // 控制面 DNS server IPv4 地址（网络字节序）
+    __u8 port[2]; // 控制面 DNS server 端口（网络字节序）
+    __u8 enabled; // 1 表示启用 UDP 53 拦截，0 表示不拦截
+    __u8 pad;
+};
+
 // 3. 定义 BPF Maps
 struct bpf_lpm_trie_key_v4
 {
@@ -131,6 +151,26 @@ struct
     __type(value, __u8);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 } route_lpm_map SEC(".maps");
+
+// 源地址白名单（LPM）：key 为源 IP 前缀，value 无实际含义（存在即命中）。
+// 只有源地址命中的流量才继续 ingress 后续处理，未命中的直接放行。
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, MAX_WHITELIST_ENTRIES);
+    __type(key, struct bpf_lpm_trie_key_v4);
+    __type(value, __u8);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+} src_whitelist_map SEC(".maps");
+
+// DNS 重定向目标表：单槽，由控制面下发 DNS server 的地址/端口。
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct dns_redirect_target);
+} dns_redirect_map SEC(".maps");
 
 // egress 规则表：key 为 egress 索引（0-255），与 route_lpm_map 的 value 对应。
 struct
@@ -248,6 +288,36 @@ static __always_inline void report_tcp_stream_event(struct __sk_buff *skb, struc
     bpf_ringbuf_submit(buf, 0);
 }
 
+// 在 TC ingress 上把 UDP 53 的 DNS 包交给控制面 DNS server 的本地监听 socket。
+// 使用控制面下发的目标地址/端口做 socket 查找（目标必须是本机 DNS listener），
+// 原包的目的地址/端口不做改写，DNS server 可通过 IP_RECVORIGDSTADDR 拿到原目的。
+// 查找/分配失败时放行（fail-open）。
+static __always_inline int dns_redirect_udp(struct __sk_buff *skb,
+                                            struct iphdr *iph,
+                                            struct udphdr *uh,
+                                            struct dns_redirect_target *target)
+{
+    struct bpf_sock_tuple tuple = {};
+
+    tuple.ipv4.saddr = iph->saddr;
+    tuple.ipv4.daddr = iph->daddr;
+    tuple.ipv4.sport = uh->source;
+    tuple.ipv4.dport = uh->dest;
+    // 用控制面下发的 DNS server 地址/端口替换查找条件，找到本地监听 socket。
+    __builtin_memcpy(&tuple.ipv4.daddr, target->addr, 4);
+    __builtin_memcpy(&tuple.ipv4.dport, target->port, 2);
+
+    struct bpf_sock *sk = bpf_sk_lookup_udp(skb, &tuple, sizeof(tuple.ipv4),
+                                            BPF_F_CURRENT_NETNS, 0);
+    if (!sk)
+        return TC_ACT_OK;
+
+    long err = bpf_sk_assign(skb, sk, 0);
+    bpf_sk_release(sk);
+    (void)err;
+    return TC_ACT_OK;
+}
+
 // 在 TC ingress 上把匹配 tproxy egress 的 TCP 包交给本地透明监听 socket。
 // 使用包的四元组做 socket 查找：新连接命中监听 socket，已建立的连接回绑到
 // 已连接 socket，保证同一流的后续包都走 tproxy 路径。
@@ -303,6 +373,13 @@ int tc_gateway_filter(struct __sk_buff *skb)
     if ((void *)(iph + 1) > data_end)
         return TC_ACT_OK;
 
+    // 源地址白名单：只有命中白名单的流量才进行 ingress 后续处理，
+    // 非白名单流量直接放行。
+    struct bpf_lpm_trie_key_v4 whitelist_key = {.prefixlen = 32};
+    __builtin_memcpy(whitelist_key.data, &iph->saddr, sizeof(whitelist_key.data));
+    if (!bpf_map_lookup_elem(&src_whitelist_map, &whitelist_key))
+        return TC_ACT_OK;
+
     // 优先检查 LPM 路由表匹配：value 是 egress 索引，具体行为查 egress_map。
     __u32 dest_ip = iph->daddr;
     struct bpf_lpm_trie_key_v4 lookup_key = {
@@ -317,6 +394,28 @@ int tc_gateway_filter(struct __sk_buff *skb)
         // FWMARK 模式兼容原实现：对任意 IP 协议直接设置 skb->mark。
         if (rule && rule->type == EGRESS_RULE_FWMARK)
             skb->mark = rule->fwmark;
+    }
+
+    // DNS 拦截：UDP 目的端口 53 的流量重定向到控制面 DNS server。
+    if (iph->protocol == IPPROTO_UDP)
+    {
+        // 安全、动态地计算 UDP 头部起始位置（ihl 以 4 字节为单位）。
+        __u32 ip_hlen = iph->ihl * 4;
+        if (ip_hlen < 20) // 基础合规性检查
+            return TC_ACT_OK;
+
+        struct udphdr *uh = (void *)((unsigned char *)iph + ip_hlen);
+        if ((void *)(uh + 1) > data_end)
+            return TC_ACT_OK;
+
+        if (uh->dest == bpf_htons(53))
+        {
+            __u32 dns_key = 0;
+            struct dns_redirect_target *target = bpf_map_lookup_elem(&dns_redirect_map, &dns_key);
+            if (target && target->enabled)
+                dns_redirect_udp(skb, iph, uh, target);
+        }
+        return TC_ACT_OK;
     }
 
     // 如果不是 TCP 协议，直接放行

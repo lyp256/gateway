@@ -34,6 +34,15 @@ func (ctl *controller) registerHttpAPI() {
 	huma.Get(hapi, apiV1("/hosts"), ctl.getHosts)
 	huma.Put(hapi, apiV1("/hosts"), ctl.setHosts)
 	huma.Delete(hapi, apiV1("/hosts/{host_name}"), ctl.deleteHosts)
+	// 上游 DNS 服务配置（持久化到数据库，支持动态调整）
+	huma.Get(hapi, apiV1("/dns/servers"), ctl.getDNSServers)
+	huma.Put(hapi, apiV1("/dns/servers"), ctl.setDNSServer)
+	huma.Post(hapi, apiV1("/dns/servers/test"), ctl.testDNSServer)
+	huma.Delete(hapi, apiV1("/dns/servers/{name}"), ctl.deleteDNSServer)
+	// 源地址白名单（仅白名单内流量执行 ingress 后续处理）
+	huma.Get(hapi, apiV1("/whitelist"), ctl.getWhitelist)
+	huma.Put(hapi, apiV1("/whitelist"), ctl.setWhitelistRule)
+	huma.Delete(hapi, apiV1("/whitelist/{cidr}"), ctl.deleteWhitelistRule)
 	// DNS 解析缓存
 	huma.Get(hapi, apiV1("/dns/cache"), ctl.getDNSCache)
 	// egress 配置

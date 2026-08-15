@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 
 	"github.com/cilium/ebpf/ringbuf"
@@ -33,6 +34,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 
 	// egress 规则先落到 egress_map，路由表里的索引才能被解析。
 	ctl.syncEgressMapToBPF()
+	// DNS 重定向目标与源地址白名单由控制面配置下发。
+	ctl.syncDnsRedirectToBPF()
+	ctl.syncWhitelistToBPF()
 
 	if len(ctl.netDevs) == 0 {
 		iface, err := getDefaultGatewayInterface()
@@ -62,6 +66,48 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 	ctl.syncRoutesToBPF()
 
 	return ctl.handleEvent(ctx)
+}
+
+// syncDnsRedirectToBPF 把配置的 DNS 重定向目标写入 dns_redirect_map。
+func (ctl *controller) syncDnsRedirectToBPF() {
+	if ctl.bpf.FilterMaps.DnsRedirectMap == nil {
+		return
+	}
+	if err := ctl.bpf.FilterMaps.DnsRedirectMap.Put(uint32(bpf.DnsRedirectMapKey), ctl.dnsRedirectTarget); err != nil {
+		slog.Error("sync dns redirect target to ebpf failed", "err", err)
+		return
+	}
+	slog.Info("dns redirect target synced", "enabled", ctl.dnsRedirectTarget.Enabled != 0)
+}
+
+// syncWhitelistToBPF 把配置的源地址白名单全量同步到 src_whitelist_map，
+// 未配置任何前缀时清空 map，即所有流量都不做 ingress 后续处理、直接放行。
+func (ctl *controller) syncWhitelistToBPF() {
+	if ctl.bpf.FilterMaps.SrcWhitelistMap == nil {
+		return
+	}
+	// 先清空旧条目，保证全量下发语义。
+	var key, nextKey bpf.FilterBpfLpmTrieKeyV4
+	for ctl.bpf.FilterMaps.SrcWhitelistMap.NextKey(&key, &nextKey) == nil {
+		if err := ctl.bpf.FilterMaps.SrcWhitelistMap.Delete(&nextKey); err != nil {
+			slog.Error("clear ebpf whitelist entry failed", "err", err)
+		}
+		key = nextKey
+	}
+	ctl.whitelistMux.RLock()
+	whitelist := make([]netip.Prefix, len(ctl.sourceWhitelist))
+	copy(whitelist, ctl.sourceWhitelist)
+	ctl.whitelistMux.RUnlock()
+	for _, prefix := range whitelist {
+		if !prefix.Addr().Is4() {
+			slog.Warn("skip non-IPv4 source whitelist prefix", "prefix", prefix.String())
+			continue
+		}
+		if err := ctl.bpf.FilterMaps.SrcWhitelistMap.Put(bpf.ToFilterBpfLpmTrieKeyV4(prefix), uint8(1)); err != nil {
+			slog.Error("sync source whitelist entry failed", "prefix", prefix.String(), "err", err)
+		}
+	}
+	slog.Info("source whitelist synced", "count", len(whitelist))
 }
 
 func (ctl *controller) handleEvent(ctx context.Context) error {

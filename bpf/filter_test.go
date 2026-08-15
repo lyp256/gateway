@@ -43,6 +43,35 @@ func TestNewFwmarkEgressRule(t *testing.T) {
 	}
 }
 
+func TestNewDnsRedirectTarget(t *testing.T) {
+	target, err := NewDnsRedirectTarget(netip.MustParseAddr("127.0.0.1"), 5453)
+	if err != nil {
+		t.Fatalf("new dns redirect target: %v", err)
+	}
+	if target.Addr != [4]uint8{127, 0, 0, 1} {
+		t.Fatalf("dns redirect addr = %v, want [127 0 0 1]", target.Addr)
+	}
+	if target.Port != [2]uint8{0x15, 0x4d} { // 5453 = 0x154d，网络字节序
+		t.Fatalf("dns redirect port = %v, want [0x15 0x4d]", target.Port)
+	}
+	if target.Enabled != 1 {
+		t.Fatalf("dns redirect enabled = %d, want 1", target.Enabled)
+	}
+
+	// IPv6 地址不支持（当前数据面仅处理 IPv4）。
+	if _, err := NewDnsRedirectTarget(netip.MustParseAddr("::1"), 5453); err == nil {
+		t.Fatal("IPv6 dns redirect addr should be rejected")
+	}
+	// 端口 0 无意义。
+	if _, err := NewDnsRedirectTarget(netip.MustParseAddr("127.0.0.1"), 0); err == nil {
+		t.Fatal("zero dns redirect port should be rejected")
+	}
+
+	if got := DisabledDnsRedirectTarget(); got.Enabled != 0 {
+		t.Fatalf("disabled target enabled = %d, want 0", got.Enabled)
+	}
+}
+
 func TestParseTcpStreamIPv4(t *testing.T) {
 	buf := make([]byte, TcpStreamBufferSizeV4)
 	buf[0] = syscall.AF_INET

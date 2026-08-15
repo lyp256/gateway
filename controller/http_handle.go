@@ -137,6 +137,41 @@ func (ctl *controller) getHosts(ctx context.Context, _ *struct{}) (*schema.Body[
 	return schema.NewBody(list), nil
 }
 
+func (ctl *controller) getWhitelist(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.WhitelistRule], error) {
+	list, err := ctl.storage.ListWhitelist()
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(list), nil
+}
+
+func (ctl *controller) setWhitelistRule(ctx context.Context, in *schema.Body[dao.WhitelistRule]) (*schema.Body[dao.WhitelistRule], error) {
+	prefix, err := dao.NormalizeWhitelist(in.Body.Cidr)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	in.Body.Cidr = prefix.String()
+	if err := ctl.storage.SetWhitelist(prefix.String()); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "save whitelist", err)
+	}
+	ctl.setWhitelist(prefix)
+	return schema.NewBody(in.Body), nil
+}
+
+func (ctl *controller) deleteWhitelistRule(ctx context.Context, i *struct {
+	Cidr string `path:"cidr"`
+}) (*struct{}, error) {
+	prefix, err := dao.NormalizeWhitelist(i.Cidr)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	if err := ctl.storage.DeleteWhitelist(prefix.String()); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	ctl.deleteWhitelist(prefix)
+	return nil, nil
+}
+
 func (ctl *controller) getDNSCache(ctx context.Context, _ *struct{}) (*schema.Body[[]schema.DNSCacheEntry], error) {
 	return schema.NewBody(ctl.dnsCacheSnapshot()), nil
 }
@@ -164,6 +199,45 @@ func (ctl *controller) deleteHosts(ctx context.Context, in *struct {
 	delete(ctl.hosts, in.Name)
 	ctl.hostsMux.Unlock()
 	ctl.dnsCache.Remove(in.Name)
+	return nil, nil
+}
+
+func (ctl *controller) getDNSServers(ctx context.Context, _ *struct{}) (*schema.Body[[]dao.DNSServer], error) {
+	list, err := ctl.storage.ListDNSServer()
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
+	return schema.NewBody(list), nil
+}
+
+func (ctl *controller) setDNSServer(ctx context.Context, in *schema.Body[dao.DNSServer]) (*schema.Body[dao.DNSServer], error) {
+	if err := dao.NormalizeDNSServer(&in.Body); err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	if _, err := newQuerier(in.Body); err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, err.Error())
+	}
+	if err := ctl.setDNSServerRuntime(in.Body); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "save dns server", err)
+	}
+	return schema.NewBody(in.Body), nil
+}
+
+func (ctl *controller) testDNSServer(ctx context.Context, in *schema.Body[dnsTestRequest]) (*schema.Body[dnsTestResult], error) {
+	req := in.Body
+	s := dao.DNSServer{Type: req.Type, Server: req.Server, IP: req.IP, Insecure: req.Insecure}
+	return schema.NewBody(probeDNSServer(s, req.QName)), nil
+}
+
+func (ctl *controller) deleteDNSServer(ctx context.Context, in *struct {
+	Name string `path:"name"`
+}) (*struct{}, error) {
+	if err := ctl.deleteDNSServerRuntime(in.Name); err != nil {
+		if errors.Is(err, dao.ErrKeyNotFound) {
+			return nil, huma.Error404NotFound("dns server not found")
+		}
+		return nil, huma.NewError(http.StatusInternalServerError, "", err)
+	}
 	return nil, nil
 }
 

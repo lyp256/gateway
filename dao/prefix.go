@@ -8,6 +8,9 @@ const (
 	PrifixCidr       = "cidr:"
 	PrefixHosts      = "host:"
 	PrefixEgress     = "egress:"
+	PrefixWhitelist  = "wl:"
+	PrefixDNSServer  = "dns:"
+	PrefixMeta       = "meta:"
 )
 
 func MarshalKey(prefix, key string) string {

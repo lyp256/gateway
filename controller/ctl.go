@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"sync"
@@ -11,8 +12,9 @@ import (
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/gaissmai/bart"
 	"github.com/go-chi/chi/v5"
-	"github.com/hashicorp/golang-lru/v2"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/lyp256/gateway/bpf"
+	"github.com/lyp256/gateway/config"
 	"github.com/lyp256/gateway/dao"
 
 	"github.com/lyp256/gateway/dns/query"
@@ -26,24 +28,24 @@ type Controller interface {
 	WaitReady(ctx context.Context) error
 }
 
-func NewController(storage *dao.Dao, dnsServers []query.DNSQuerier, e chi.Router) Controller {
+func NewController(storage *dao.Dao, e chi.Router, cfg config.Config) Controller {
 	if e == nil {
 		e = chi.NewRouter()
 	}
 	mux := &sync.RWMutex{}
 	hosts := make(map[string]netip.Addr)
 
-	dnsServers = append([]query.DNSQuerier{query.NewStatic(hosts, mux.RLocker())}, dnsServers...)
 	c := controller{
 		hostsMux:          mux,
 		hosts:             hosts,
-		dnsServers:        dnsServers,
+		dnsServers:        []query.DNSQuerier{query.NewStatic(hosts, mux.RLocker())},
 		dnsCache:          newDNSCache(),
 		http:              e,
 		waitReadCh:        make(chan struct{}),
 		storage:           storage,
 		egressIndexByName: make(map[string]uint8),
 	}
+	c.applyConfig(cfg)
 	c.initMetrics()
 	c.registerHttpAPI()
 	return &c
@@ -57,7 +59,8 @@ type controller struct {
 	// 本地 dns map
 	hosts map[string]netip.Addr
 	// 上游dns 服务
-	dnsServers []query.DNSQuerier
+	dnsServersMux sync.RWMutex
+	dnsServers    []query.DNSQuerier
 	// Recently resolved DNS responses, bounded by dnsCacheSize.
 	dnsCache *lru.Cache[string, dnsCacheEntry]
 	// ebpf 路由表
@@ -71,6 +74,11 @@ type controller struct {
 	egressIndexByName map[string]uint8
 	egressRules       [bpf.MaxEgressRules]bpf.FilterEgressRule
 	egressNextIndex   uint8
+	// DNS 重定向目标（控制面配置，启动时同步到 dns_redirect_map）
+	dnsRedirectTarget bpf.FilterDnsRedirectTarget
+	// 源地址白名单（持久化在数据库，启动加载并同步到 src_whitelist_map，运行时可动态调整）
+	whitelistMux    sync.RWMutex
+	sourceWhitelist []netip.Prefix
 
 	// 网卡
 	netDevs []string
@@ -91,9 +99,24 @@ type controller struct {
 	ready      bool
 }
 
+// applyConfig 把控制面配置转换成 BPF 运行时参数。
+func (c *controller) applyConfig(cfg config.Config) {
+	target, err := bpf.NewDnsRedirectTarget(netip.AddrFrom4([4]byte{127, 0, 0, 1}), cfg.DNSPort)
+	if err != nil {
+		slog.Error("invalid dns redirect target, dns interception disabled",
+			"target", fmt.Sprintf("127.0.0.1:%d", cfg.DNSPort), "err", err)
+		c.dnsRedirectTarget = bpf.DisabledDnsRedirectTarget()
+	} else {
+		c.dnsRedirectTarget = target
+	}
+}
+
 func (ctl *controller) Run(ctx context.Context) error {
 	ctl.ctx, ctl.cancel = context.WithCancel(ctx)
 	defer ctl.cancel()
+	if err := ctl.loadDNSServersFromStorage(); err != nil {
+		return err
+	}
 	err := loadHostsFromStorage(ctl.storage, ctl.hosts)
 	if err != nil {
 		return err
@@ -109,6 +132,9 @@ func (ctl *controller) Run(ctx context.Context) error {
 	ctl.dnsTable = router.NewMemoryMap(routeMap)
 	err = loadCidrRuleMapFromStorage(&ctl.routeTable, ctl.storage, ctl.egressIndexByName)
 	if err != nil {
+		return err
+	}
+	if err := ctl.loadWhitelistFromStorage(); err != nil {
 		return err
 	}
 

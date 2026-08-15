@@ -22,6 +22,9 @@ const (
 
 	// MaxEgressRules 与 filter.c 中 egress_map 的容量一致。
 	MaxEgressRules = 256
+
+	// DnsRedirectMapKey 是 dns_redirect_map 的单槽 key。
+	DnsRedirectMapKey uint32 = 0
 )
 
 func ToFilterBpfLpmTrieKeyV4(ip netip.Prefix) FilterBpfLpmTrieKeyV4 {
@@ -63,6 +66,30 @@ func NewTproxyEgressRule(addr netip.Addr, port uint16) (FilterEgressRule, error)
 		rule.TproxyPort[1] = byte(port)
 	}
 	return rule, nil
+}
+
+// NewDnsRedirectTarget 构造 UDP 53 DNS 重定向目标。
+// addr/port 必须指向控制面 DNS server 的本地监听地址，否则返回错误；
+// 返回的目标带 Enabled=1，写入 dns_redirect_map 后 BPF 数据面即开始拦截。
+func NewDnsRedirectTarget(addr netip.Addr, port uint16) (FilterDnsRedirectTarget, error) {
+	target := FilterDnsRedirectTarget{}
+	if !addr.Is4() {
+		return target, fmt.Errorf("dns redirect addr must be IPv4: %s", addr)
+	}
+	if port == 0 {
+		return target, fmt.Errorf("dns redirect port must not be 0")
+	}
+	copy(target.Addr[:], addr.AsSlice())
+	target.Port[0] = byte(port >> 8)
+	target.Port[1] = byte(port)
+	target.Enabled = 1
+	return target, nil
+}
+
+// DisabledDnsRedirectTarget 返回禁用状态的 DNS 重定向目标，
+// 写入 dns_redirect_map 后 BPF 数据面停止拦截 UDP 53。
+func DisabledDnsRedirectTarget() FilterDnsRedirectTarget {
+	return FilterDnsRedirectTarget{}
 }
 
 func FromFilterBpfLpmTrieKeyV4(key FilterBpfLpmTrieKeyV4) netip.Prefix {

@@ -13,9 +13,11 @@ import {
   Network,
   Pencil,
   Plus,
+  Radio,
   RefreshCw,
   Route,
   Server,
+  Shield,
   Trash2,
   X,
 } from 'lucide-vue-next'
@@ -68,7 +70,23 @@ function emptyHost() {
   return { name: '', ip: '' }
 }
 
-const viewIds = new Set(['overview', 'egresses', 'domains', 'cidrs', 'hosts', 'routes', 'dns-cache'])
+function emptyWhitelist() {
+  return { cidr: '' }
+}
+
+function emptyDNSServer() {
+  return { name: '', type: 'doh', server: '', ip: '', insecure: false }
+}
+
+function emptyDNSTest() {
+  return { source: '', type: 'doh', server: '', ip: '', insecure: false, qname: 'example.com' }
+}
+
+function dnsTypeLabel(type) {
+  return ({ udp: 'UDP', dot: 'DoT', doh: 'DoH' })[type] || 'UDP'
+}
+
+const viewIds = new Set(['overview', 'egresses', 'domains', 'cidrs', 'hosts', 'dns-servers', 'whitelist', 'routes', 'dns-cache'])
 
 function viewFromHash(hash = window.location.hash) {
   const view = hash.replace(/^#\/?/, '').split(/[/?]/, 1)[0]
@@ -94,9 +112,11 @@ const App = {
     Network,
     Pencil,
     Plus,
+    Radio,
     RefreshCw,
     Route,
     Server,
+    Shield,
     Trash2,
     X,
   },
@@ -113,7 +133,15 @@ const App = {
     const domainForm = reactive(emptyDomain())
     const cidrForm = reactive(emptyCidr())
     const hostForm = reactive(emptyHost())
-    const data = reactive({ egresses: [], domains: [], cidrs: [], hosts: [], routes: [], dnsCache: [] })
+    const whitelistForm = reactive(emptyWhitelist())
+    const dnsServerForm = reactive(emptyDNSServer())
+    const dnsServerTest = reactive({})
+    const modalTesting = ref(false)
+    const modalTestResult = ref(null)
+    const dnsTestForm = reactive(emptyDNSTest())
+    const dnsTesting = ref(false)
+    const dnsTestResult = ref(null)
+    const data = reactive({ egresses: [], domains: [], cidrs: [], hosts: [], dnsServers: [], whitelist: [], routes: [], dnsCache: [] })
 
     const navItems = [
       { id: 'overview', label: '总览', icon: 'Activity' },
@@ -121,8 +149,10 @@ const App = {
       { id: 'domains', label: '域名规则', icon: 'Globe2' },
       { id: 'cidrs', label: 'IP 规则', icon: 'Network' },
       { id: 'hosts', label: '静态 Hosts', icon: 'Server' },
+      { id: 'dns-servers', label: '上游 DNS', icon: 'Radio' },
       { id: 'routes', label: '生效路由', icon: 'Route' },
       { id: 'dns-cache', label: 'DNS 缓存', icon: 'Database' },
+      { id: 'whitelist', label: '白名单', icon: 'Shield' },
     ]
 
     const stats = computed(() => [
@@ -142,6 +172,9 @@ const App = {
       domain: editing.value ? '编辑域名规则' : '新建域名规则',
       cidr: editing.value ? '编辑 IP 规则' : '新建 IP 规则',
       host: editing.value ? '编辑静态 Hosts' : '新建静态 Hosts',
+      'dns-server': editing.value ? '编辑上游 DNS' : '新建上游 DNS',
+      'dns-test': 'DNS 连通性测试',
+      whitelist: editing.value ? '编辑白名单' : '新增白名单',
     })[modal.value] || '')
 
     function clearMessage() {
@@ -171,15 +204,18 @@ const App = {
       clearMessage()
       loading.value = true
       try {
-        const [egresses, domains, cidrs, hosts, routes, dnsCache] = await Promise.all([
-          api('/egresses'), api('/domains'), api('/cidrs'), api('/hosts'), api('/routes'), api('/dns/cache'),
+        const [egresses, domains, cidrs, hosts, dnsServers, whitelist, routes, dnsCache] = await Promise.all([
+          api('/egresses'), api('/domains'), api('/cidrs'), api('/hosts'), api('/dns/servers'), api('/whitelist'), api('/routes'), api('/dns/cache'),
         ])
         data.egresses = Array.isArray(egresses) ? egresses : []
         data.domains = Array.isArray(domains) ? domains : []
         data.cidrs = Array.isArray(cidrs) ? cidrs : []
         data.hosts = Array.isArray(hosts) ? hosts : []
+        data.dnsServers = Array.isArray(dnsServers) ? dnsServers : []
+        data.whitelist = Array.isArray(whitelist) ? whitelist : []
         data.routes = Array.isArray(routes) ? routes : []
         data.dnsCache = Array.isArray(dnsCache) ? dnsCache : []
+        Object.keys(dnsServerTest).forEach((name) => delete dnsServerTest[name])
         lastUpdated.value = new Date()
       } catch (cause) {
         error.value = cause.message
@@ -226,9 +262,80 @@ const App = {
       modal.value = 'host'
     }
 
+    function openWhitelist(item) {
+      editing.value = item || null
+      resetForm(whitelistForm, item ? { cidr: item.cidr } : emptyWhitelist())
+      modal.value = 'whitelist'
+    }
+
+    function openDNSServer(item) {
+      editing.value = item || null
+      modalTestResult.value = null
+      resetForm(dnsServerForm, item ? {
+        name: item.name, type: item.type || 'udp', server: item.server || '', ip: item.ip || '', insecure: !!item.insecure,
+      } : emptyDNSServer())
+      modal.value = 'dns-server'
+    }
+
+    function openDNSTest() {
+      resetForm(dnsTestForm, emptyDNSTest())
+      dnsTestResult.value = null
+      modal.value = 'dns-test'
+    }
+
+    function useDNSTestSource() {
+      const item = data.dnsServers.find((candidate) => candidate.name === dnsTestForm.source)
+      if (!item) return
+      dnsTestForm.type = item.type || 'udp'
+      dnsTestForm.server = item.server || ''
+      dnsTestForm.ip = item.ip || ''
+      dnsTestForm.insecure = !!item.insecure
+    }
+
+    async function runDNSTest() {
+      const type = dnsTestForm.type
+      const server = dnsTestForm.server.trim()
+      const ip = dnsTestForm.ip.trim()
+      const qname = dnsTestForm.qname.trim()
+      if (type === 'udp' && !ip) {
+        error.value = 'UDP 类型需要填写上游 IP 地址。'
+        return
+      }
+      if ((type === 'dot' && !server && !ip) || (type === 'doh' && !server)) {
+        error.value = type === 'doh' ? 'DoH 类型需要填写服务器域名。' : 'DoT 类型需要填写服务器域名或 IP 地址。'
+        return
+      }
+      if (!qname) {
+        error.value = '请填写测试域名。'
+        return
+      }
+      dnsTesting.value = true
+      dnsTestResult.value = null
+      clearMessage()
+      try {
+        const result = await api('/dns/servers/test', {
+          method: 'POST',
+          body: JSON.stringify({
+            type,
+            server,
+            ip: ip || null,
+            insecure: dnsTestForm.insecure,
+            qname,
+          }),
+        })
+        dnsTestResult.value = result
+      } catch (cause) {
+        dnsTestResult.value = { ok: false, message: cause.message }
+      } finally {
+        dnsTesting.value = false
+      }
+    }
+
     function closeModal() {
       modal.value = ''
       editing.value = null
+      modalTestResult.value = null
+      dnsTestResult.value = null
     }
 
     async function saveEgress() {
@@ -346,19 +453,116 @@ const App = {
       }
     }
 
+    async function saveWhitelist() {
+      const cidr = whitelistForm.cidr.trim()
+      if (!cidr) {
+        error.value = '请填写 CIDR 网段或 IP 地址。'
+        return
+      }
+      saving.value = true
+      clearMessage()
+      try {
+        await api('/whitelist', {
+          method: 'PUT',
+          body: JSON.stringify({ cidr }),
+        })
+        closeModal()
+        notice.value = '白名单已保存。'
+        await refresh()
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        saving.value = false
+      }
+    }
+
+    function dnsServerConfig() {
+      const type = dnsServerForm.type
+      const server = dnsServerForm.server.trim()
+      const ip = dnsServerForm.ip.trim()
+      if (type === 'udp' && !ip) {
+        error.value = 'UDP 类型需要填写上游 IP 地址。'
+        return null
+      }
+      if ((type === 'dot' && !server && !ip) || (type === 'doh' && !server)) {
+        error.value = type === 'doh' ? 'DoH 类型需要填写服务器域名。' : 'DoT 类型需要填写服务器域名或 IP 地址。'
+        return null
+      }
+      return { type, server, ip: ip || null, insecure: dnsServerForm.insecure }
+    }
+
+    async function testDNSServerForm() {
+      const config = dnsServerConfig()
+      if (!config) return
+      modalTesting.value = true
+      modalTestResult.value = null
+      clearMessage()
+      try {
+        const result = await api('/dns/servers/test', { method: 'POST', body: JSON.stringify(config) })
+        modalTestResult.value = result
+      } catch (cause) {
+        modalTestResult.value = { ok: false, message: cause.message }
+      } finally {
+        modalTesting.value = false
+      }
+    }
+
+    async function testDNSServerRow(item) {
+      clearMessage()
+      dnsServerTest[item.name] = { testing: true }
+      try {
+        const result = await api('/dns/servers/test', {
+          method: 'POST',
+          body: JSON.stringify({ type: item.type, server: item.server || '', ip: item.ip || null, insecure: !!item.insecure }),
+        })
+        dnsServerTest[item.name] = result
+      } catch (cause) {
+        dnsServerTest[item.name] = { ok: false, message: cause.message }
+      }
+    }
+
+    async function saveDNSServer() {
+      const name = dnsServerForm.name.trim()
+      if (!name) {
+        error.value = '请填写上游 DNS 名称。'
+        return
+      }
+      const config = dnsServerConfig()
+      if (!config) return
+      saving.value = true
+      clearMessage()
+      try {
+        await api('/dns/servers', {
+          method: 'PUT',
+          body: JSON.stringify({ name, ...config }),
+        })
+        closeModal()
+        notice.value = '上游 DNS 配置已保存。'
+        await refresh()
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        saving.value = false
+      }
+    }
+
     async function remove(kind, item) {
-      const labels = { egress: '出口', domain: '域名规则', cidr: 'IP 规则', host: '静态 Hosts' }
-      const identifier = kind === 'domain' ? item.domain : kind === 'cidr' ? item.cidr : item.name
+      const labels = { egress: '出口', domain: '域名规则', cidr: 'IP 规则', host: '静态 Hosts', 'dns-server': '上游 DNS', whitelist: '白名单' }
+      const identifier = kind === 'domain' ? item.domain : (kind === 'cidr' || kind === 'whitelist') ? item.cidr : item.name
       if (!window.confirm(`确认删除${labels[kind]}「${identifier}」？`)) return
       clearMessage()
       try {
         const path = kind === 'egress'
           ? `/egresses/${encodeURIComponent(item.name)}`
+          : kind === 'dns-server'
+            ? `/dns/servers/${encodeURIComponent(item.name)}`
           : kind === 'domain'
             ? `/domains/${encodeURIComponent(`${item.match}:${item.domain}`)}`
             : kind === 'cidr'
               ? `/cidrs/${encodeURIComponent(item.cidr)}`
-              : `/hosts/${encodeURIComponent(item.name)}`
+              : kind === 'whitelist'
+                ? `/whitelist/${encodeURIComponent(item.cidr)}`
+                : `/hosts/${encodeURIComponent(item.name)}`
         await api(path, { method: 'DELETE' })
         notice.value = `${labels[kind]}已删除。`
         await refresh()
@@ -372,10 +576,12 @@ const App = {
       if (currentView.value === 'domains') openDomain()
       if (currentView.value === 'cidrs') openCidr()
       if (currentView.value === 'hosts') openHost()
+      if (currentView.value === 'dns-servers') openDNSServer()
+      if (currentView.value === 'whitelist') openWhitelist()
     }
 
-    const addLabel = computed(() => ({ egresses: '新建出口', domains: '新建规则', cidrs: '新建 IP 规则', hosts: '新建 Hosts' })[currentView.value] || '')
-    const canAdd = computed(() => ['egresses', 'domains', 'cidrs', 'hosts'].includes(currentView.value))
+    const addLabel = computed(() => ({ egresses: '新建出口', domains: '新建规则', cidrs: '新建 IP 规则', hosts: '新建 Hosts', 'dns-servers': '新建上游', whitelists: '新增白名单' })[currentView.value] || '')
+    const canAdd = computed(() => ['egresses', 'domains', 'cidrs', 'hosts', 'dns-servers', 'whitelists'].includes(currentView.value))
 
     onMounted(() => {
       syncViewFromHash()
@@ -386,10 +592,11 @@ const App = {
     onBeforeUnmount(() => window.removeEventListener('hashchange', syncViewFromHash))
 
     return {
-      addForView, addLabel, canAdd, cidrForm, closeModal, currentView, data, domainForm, egressDesc,
+      addForView, addLabel, canAdd, cidrForm, closeModal, currentView, data, dnsServerForm, dnsServerTest, dnsTestForm, dnsTesting, dnsTestResult, dnsTypeLabel, domainForm, egressDesc,
       egressByIndex, egressByName, egressForm, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
-      navigate, openCidr, openDomain, openEgress, openHost, refresh, remove, saveCidr, saveDomain, saveEgress, saveHost,
-      saving, selectedCidrEgress, selectedDomainEgress, stats,
+      modalTestResult, modalTesting, navigate, openCidr, openDNSServer, openDNSTest, openDomain, openEgress, openHost, openWhitelist, refresh, remove, runDNSTest, saveCidr, saveDNSServer,
+      saveDomain, saveEgress, saveHost, saveWhitelist, saving, selectedCidrEgress, selectedDomainEgress, stats, whitelistForm,
+      testDNSServerForm, testDNSServerRow, useDNSTestSource,
     }
   },
   template: `
@@ -420,6 +627,7 @@ const App = {
           <div class="topbar-actions">
             <span v-if="lastUpdated" class="updated">更新于 {{ lastUpdated.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}</span>
             <button class="icon-button" title="刷新数据" :disabled="loading" @click="refresh"><RefreshCw :size="18" :class="{ spinning: loading }" /></button>
+            <button v-if="currentView === 'dns-servers'" class="secondary-button" @click="openDNSTest"><Activity :size="18" />DNS 测试</button>
             <button v-if="canAdd" class="primary-button" @click="addForView"><Plus :size="18" />{{ addLabel }}</button>
           </div>
         </header>
@@ -459,6 +667,20 @@ const App = {
                 </div>
                 <div v-else class="empty-inline"><Network :size="19" />尚无显式 IP 规则</div>
               </section>
+              <section class="panel-list">
+                <div class="section-heading"><div><p class="eyebrow">SOURCE WHITELIST</p><h2>源地址白名单</h2></div><button class="text-button" @click="navigate('whitelist')">查看全部 <ArrowUpRight :size="16" /></button></div>
+                <div v-if="data.whitelist.length" class="compact-list">
+                  <div v-for="item in data.whitelist.slice(0, 4)" :key="item.cidr" class="compact-row"><code>{{ item.cidr }}</code><span class="row-name">ingress 白名单</span><span class="badge badge-teal">白名单</span></div>
+                </div>
+                <div v-else class="empty-inline"><Shield :size="19" />尚未配置源地址白名单</div>
+              </section>
+              <section class="panel-list panel-wide">
+                <div class="section-heading"><div><p class="eyebrow">UPSTREAM DNS</p><h2>上游 DNS</h2></div><button class="text-button" @click="navigate('dns-servers')">查看全部 <ArrowUpRight :size="16" /></button></div>
+                <div v-if="data.dnsServers.length" class="compact-list">
+                  <div v-for="server in data.dnsServers.slice(0, 4)" :key="server.name" class="compact-row"><span class="row-name">{{ server.name }}</span><span class="badge" :class="server.type === 'doh' ? 'badge-teal' : server.type === 'dot' ? 'badge-lime' : 'badge-neutral'">{{ dnsTypeLabel(server.type) }}</span><code>{{ server.server || server.ip || '-' }}</code></div>
+                </div>
+                <div v-else class="empty-inline"><Radio :size="19" />尚未配置上游 DNS</div>
+              </section>
             </div>
             <section class="guidance">
               <CircleHelp :size="20" />
@@ -490,6 +712,18 @@ const App = {
             <div v-else class="empty-state"><Server :size="28" /><h2>还没有静态 Hosts</h2><button class="primary-button" @click="openHost()"><Plus :size="18" />新建 Hosts</button></div>
           </section>
 
+          <section v-else-if="currentView === 'dns-servers'" class="view">
+            <div class="section-heading"><div><p class="eyebrow">UPSTREAM DNS</p><h2>上游 DNS 服务</h2></div><span class="item-count">{{ data.dnsServers.length }} 项</span></div>
+            <div v-if="data.dnsServers.length" class="table-wrap"><table><thead><tr><th>名称</th><th>类型</th><th>服务器</th><th>直连 IP</th><th>证书校验</th><th>连接状态</th><th></th></tr></thead><tbody><tr v-for="item in data.dnsServers" :key="item.name"><td class="row-name">{{ item.name }}</td><td><span class="badge" :class="item.type === 'doh' ? 'badge-teal' : item.type === 'dot' ? 'badge-lime' : 'badge-neutral'">{{ dnsTypeLabel(item.type) }}</span></td><td class="muted truncate">{{ item.server || '-' }}</td><td><code>{{ item.ip || '-' }}</code></td><td class="muted">{{ item.insecure ? '跳过' : '校验' }}</td><td class="dns-test-cell"><span v-if="dnsServerTest[item.name]?.testing" class="dns-testing"><LoaderCircle :size="13" class="spinning" />测试中</span><span v-else-if="dnsServerTest[item.name]" :class="dnsServerTest[item.name].ok ? 'dns-test-ok-text' : 'dns-test-fail-text'">{{ dnsServerTest[item.name].message }}</span><span v-else class="muted">未测试</span></td><td class="actions"><button class="icon-button" title="测试连接" :disabled="dnsServerTest[item.name]?.testing" @click="testDNSServerRow(item)"><Activity :size="17" /></button><button class="icon-button" title="编辑上游" @click="openDNSServer(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除上游" @click="remove('dns-server', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-else class="empty-state"><Radio :size="28" /><h2>还没有上游 DNS 配置</h2><button class="primary-button" @click="openDNSServer()"><Plus :size="18" />新建上游</button></div>
+          </section>
+
+          <section v-else-if="currentView === 'whitelist'" class="view">
+            <div class="section-heading"><div><p class="eyebrow">SOURCE WHITELIST</p><h2>源地址白名单</h2></div><span class="item-count">{{ data.whitelist.length }} 项</span></div>
+            <div v-if="data.whitelist.length" class="table-wrap"><table><thead><tr><th>CIDR 网段</th><th>说明</th><th></th></tr></thead><tbody><tr v-for="item in data.whitelist" :key="item.cidr"><td class="row-name"><code>{{ item.cidr }}</code></td><td class="muted">该网段源地址的流量执行 ingress 后续处理，其余直接放行</td><td class="actions"><button class="icon-button" title="编辑条目" @click="openWhitelist(item)"><Pencil :size="17" /></button><button class="icon-button danger" title="删除条目" @click="remove('whitelist', item)"><Trash2 :size="17" /></button></td></tr></tbody></table></div>
+            <div v-else class="empty-state"><Shield :size="28" /><h2>还没有白名单条目</h2><button class="primary-button" @click="openWhitelist()"><Plus :size="18" />新增白名单</button></div>
+          </section>
+
           <section v-else-if="currentView === 'routes'" class="view">
             <div class="section-heading"><div><p class="eyebrow">ACTIVE SNAPSHOT</p><h2>当前 IPv4 路由</h2></div><span class="item-count">{{ data.routes.length }} 项</span></div>
             <div v-if="data.routes.length" class="table-wrap"><table><thead><tr><th>CIDR</th><th>egress 索引</th><th>关联出口</th></tr></thead><tbody><tr v-for="item in data.routes" :key="item.cidr"><td><code>{{ item.cidr }}</code></td><td><code>{{ item.value }}</code></td><td>{{ egressByIndex.get(Number(item.value))?.name || '-' }}</td></tr></tbody></table></div>
@@ -505,7 +739,7 @@ const App = {
       </section>
 
       <div v-if="modal" class="modal-backdrop" @mousedown.self="closeModal">
-        <form class="modal" @submit.prevent="modal === 'egress' ? saveEgress() : modal === 'domain' ? saveDomain() : modal === 'cidr' ? saveCidr() : saveHost()">
+        <form class="modal" @submit.prevent="modal === 'egress' ? saveEgress() : modal === 'domain' ? saveDomain() : modal === 'cidr' ? saveCidr() : modal === 'dns-test' ? runDNSTest() : modal === 'dns-server' ? saveDNSServer() : modal === 'whitelist' ? saveWhitelist() : saveHost()">
           <header><div><p class="eyebrow">CONFIGURATION</p><h2>{{ modalTitle }}</h2></div><button type="button" class="icon-button" title="关闭" @click="closeModal"><X :size="18" /></button></header>
           <div v-if="modal === 'egress'" class="form-fields">
             <label><span>名称</span><input v-model="egressForm.name" :disabled="!!editing" required placeholder="proxy-a" /></label>
@@ -523,8 +757,35 @@ const App = {
             <label><span>CIDR 网段</span><input v-model="cidrForm.cidr" :disabled="!!editing" required placeholder="203.0.113.0/24" /><small>填写 IPv4 网段，如 203.0.113.0/24，直接按最长前缀匹配，不依赖 DNS 解析。</small></label>
             <label><span>关联出口</span><select v-model="cidrForm.egress" required><option value="">选择出口</option><option v-for="item in data.egresses" :key="item.name" :value="item.name">{{ item.name }} · {{ egressDesc(item) }}</option></select><small v-if="selectedCidrEgress">将使用 {{ egressDesc(selectedCidrEgress) }}</small></label>
           </div>
+          <div v-else-if="modal === 'dns-test'" class="form-fields">
+            <label><span>已有上游（可选）</span><select v-model="dnsTestForm.source" @change="useDNSTestSource"><option value="">自定义输入</option><option v-for="item in data.dnsServers" :key="item.name" :value="item.name">{{ item.name }} · {{ dnsTypeLabel(item.type) }} · {{ item.server || item.ip || '-' }}</option></select><small>选择已有上游会自动填充下方配置，仍可手动修改。</small></label>
+            <label><span>类型</span><select v-model="dnsTestForm.type"><option value="udp">UDP</option><option value="dot">DoT（DNS over TLS）</option><option value="doh">DoH（DNS over HTTPS）</option></select></label>
+            <label v-if="dnsTestForm.type !== 'udp'"><span>服务器地址</span><input v-model="dnsTestForm.server" placeholder="doh.pub" /><small>DoH/DoT 的服务器域名，用于 TLS SNI 与证书校验。</small></label>
+            <label><span>上游 IP</span><input v-model="dnsTestForm.ip" placeholder="1.12.12.12" /><small>UDP 类型必填；DoT/DoH 填写后直接连接该 IP，跳过系统 DNS 解析。</small></label>
+            <label v-if="dnsTestForm.type !== 'udp'" class="check-field"><span>跳过证书校验</span><input v-model="dnsTestForm.insecure" type="checkbox" /></label>
+            <label><span>测试域名</span><input v-model="dnsTestForm.qname" placeholder="example.com" /><small>向该上游发送 A 记录查询，可自行更换域名。</small></label>
+            <div v-if="dnsTestResult" class="dns-test-result" :class="dnsTestResult.ok ? 'dns-test-ok' : 'dns-test-fail'">
+              <component :is="dnsTestResult.ok ? 'Check' : 'X'" :size="16" />
+              <div><strong>{{ dnsTestResult.message }}</strong><span v-if="dnsTestResult.latencyMs != null">耗时 {{ dnsTestResult.latencyMs }}ms</span><code v-for="answer in dnsTestResult.answers" :key="answer">{{ answer }}</code></div>
+            </div>
+          </div>
+          <div v-else-if="modal === 'dns-server'" class="form-fields">
+            <label><span>名称</span><input v-model="dnsServerForm.name" :disabled="!!editing" required placeholder="primary" /><small>页面管理标识，保存后不可修改。</small></label>
+            <label><span>类型</span><select v-model="dnsServerForm.type"><option value="udp">UDP</option><option value="dot">DoT（DNS over TLS）</option><option value="doh">DoH（DNS over HTTPS）</option></select></label>
+            <label v-if="dnsServerForm.type !== 'udp'"><span>服务器地址</span><input v-model="dnsServerForm.server" placeholder="doh.pub" /><small>DoH/DoT 的服务器域名，用于 TLS SNI 与证书校验。</small></label>
+            <label><span>上游 IP</span><input v-model="dnsServerForm.ip" placeholder="1.12.12.12" /><small>UDP 类型必填；DoT/DoH 填写后直接连接该 IP，跳过系统 DNS 解析。</small></label>
+            <label v-if="dnsServerForm.type !== 'udp'" class="check-field"><span>跳过证书校验</span><input v-model="dnsServerForm.insecure" type="checkbox" /></label>
+            <div v-if="modalTestResult" class="dns-test-result" :class="modalTestResult.ok ? 'dns-test-ok' : 'dns-test-fail'">
+              <component :is="modalTestResult.ok ? 'Check' : 'X'" :size="16" />
+              <div><strong>{{ modalTestResult.message }}</strong><span v-if="modalTestResult.latencyMs != null">耗时 {{ modalTestResult.latencyMs }}ms</span><code v-for="answer in modalTestResult.answers" :key="answer">{{ answer }}</code></div>
+            </div>
+          </div>
+          <div v-else-if="modal === 'whitelist'" class="form-fields"><label><span>CIDR 网段 / IP</span><input v-model="whitelistForm.cidr" required placeholder="10.0.0.0/8 或 192.168.1.1" /><small>仅 IPv4；单 IP 自动按 /32 处理，只有该网段源地址的流量才会执行 ingress 后续处理。</small></label></div>
           <div v-else class="form-fields"><label><span>主机名</span><input v-model="hostForm.name" :disabled="!!editing" required placeholder="internal.example.com" /></label><label><span>IP 地址</span><input v-model="hostForm.ip" required placeholder="192.0.2.10 或 2001:db8::10" /></label></div>
-          <footer><button type="button" class="secondary-button" @click="closeModal">取消</button><button type="submit" class="primary-button" :disabled="saving"><LoaderCircle v-if="saving" :size="17" class="spinning" /><Check v-else :size="17" />保存</button></footer>
+          <footer>
+            <template v-if="modal === 'dns-test'"><button type="button" class="primary-button" :disabled="dnsTesting" @click="runDNSTest"><LoaderCircle v-if="dnsTesting" :size="17" class="spinning" /><Activity v-else :size="17" />开始测试</button><button type="button" class="secondary-button" @click="closeModal">关闭</button></template>
+            <template v-else><button v-if="modal === 'dns-server'" type="button" class="secondary-button" :disabled="modalTesting" @click="testDNSServerForm"><LoaderCircle v-if="modalTesting" :size="17" class="spinning" /><Activity v-else :size="17" />测试连接</button><button type="button" class="secondary-button" @click="closeModal">取消</button><button type="submit" class="primary-button" :disabled="saving"><LoaderCircle v-if="saving" :size="17" class="spinning" /><Check v-else :size="17" />保存</button></template>
+          </footer>
         </form>
       </div>
 

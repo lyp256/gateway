@@ -11,6 +11,7 @@ import (
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
 	"github.com/go-chi/chi/v5"
+	"github.com/lyp256/gateway/config"
 	"github.com/lyp256/gateway/dns/query"
 	"github.com/lyp256/gateway/dns/router"
 )
@@ -51,7 +52,10 @@ func (w *cacheTestResponseWriter) Write(data []byte) (int, error) {
 
 func TestQueryDNSCachesResponse(t *testing.T) {
 	upstream := &cacheTestQuerier{}
-	ctl := NewController(nil, []query.DNSQuerier{upstream}, chi.NewRouter()).(*controller)
+	ctl := NewController(nil, chi.NewRouter(), config.Config{}).(*controller)
+	ctl.dnsServersMux.Lock()
+	ctl.dnsServers = append(ctl.dnsServers, upstream)
+	ctl.dnsServersMux.Unlock()
 	ctl.dnsTable = router.NewMemoryMap(map[string]uint64{})
 
 	firstRequest := dns.NewMsg("example.com.", dns.TypeA)

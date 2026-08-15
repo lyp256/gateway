@@ -18,6 +18,14 @@ type FilterBpfLpmTrieKeyV4 struct {
 	Data      [4]uint8
 }
 
+type FilterDnsRedirectTarget struct {
+	_       structs.HostLayout
+	Addr    [4]uint8
+	Port    [2]uint8
+	Enabled uint8
+	Pad     uint8
+}
+
 type FilterEgressRule struct {
 	_          structs.HostLayout
 	Type       uint8
@@ -32,9 +40,11 @@ type FilterEgressRule struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	FilterMapDnsRedirectMap   = "dns_redirect_map"
 	FilterMapEgressMap        = "egress_map"
 	FilterMapEventsRingbuf    = "events_ringbuf"
 	FilterMapRouteLpmMap      = "route_lpm_map"
+	FilterMapSrcWhitelistMap  = "src_whitelist_map"
 	FilterProgTcGatewayFilter = "tc_gateway_filter"
 )
 
@@ -87,9 +97,11 @@ type FilterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type FilterMapSpecs struct {
-	EgressMap     *ebpf.MapSpec `ebpf:"egress_map"`
-	EventsRingbuf *ebpf.MapSpec `ebpf:"events_ringbuf"`
-	RouteLpmMap   *ebpf.MapSpec `ebpf:"route_lpm_map"`
+	DnsRedirectMap  *ebpf.MapSpec `ebpf:"dns_redirect_map"`
+	EgressMap       *ebpf.MapSpec `ebpf:"egress_map"`
+	EventsRingbuf   *ebpf.MapSpec `ebpf:"events_ringbuf"`
+	RouteLpmMap     *ebpf.MapSpec `ebpf:"route_lpm_map"`
+	SrcWhitelistMap *ebpf.MapSpec `ebpf:"src_whitelist_map"`
 }
 
 // FilterVariableSpecs contains global variables before they are loaded into the kernel.
@@ -118,16 +130,20 @@ func (o *FilterObjects) Close() error {
 //
 // It can be passed to LoadFilterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type FilterMaps struct {
-	EgressMap     *ebpf.Map `ebpf:"egress_map"`
-	EventsRingbuf *ebpf.Map `ebpf:"events_ringbuf"`
-	RouteLpmMap   *ebpf.Map `ebpf:"route_lpm_map"`
+	DnsRedirectMap  *ebpf.Map `ebpf:"dns_redirect_map"`
+	EgressMap       *ebpf.Map `ebpf:"egress_map"`
+	EventsRingbuf   *ebpf.Map `ebpf:"events_ringbuf"`
+	RouteLpmMap     *ebpf.Map `ebpf:"route_lpm_map"`
+	SrcWhitelistMap *ebpf.Map `ebpf:"src_whitelist_map"`
 }
 
 func (m *FilterMaps) Close() error {
 	return _FilterClose(
+		m.DnsRedirectMap,
 		m.EgressMap,
 		m.EventsRingbuf,
 		m.RouteLpmMap,
+		m.SrcWhitelistMap,
 	)
 }
 

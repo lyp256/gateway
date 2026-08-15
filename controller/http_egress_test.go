@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/lyp256/gateway/config"
 	"github.com/lyp256/gateway/dao"
 	"github.com/lyp256/gateway/dns/router"
 	"go.etcd.io/bbolt"
@@ -28,7 +29,7 @@ func newEgressTestController(t *testing.T) Controller {
 	}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	ctl := NewController(dao.New(db), nil, chi.NewRouter()).(*controller)
+	ctl := NewController(dao.New(db), chi.NewRouter(), config.Config{}).(*controller)
 	ctl.dnsTable = router.NewMemoryMap(nil)
 	return ctl
 }

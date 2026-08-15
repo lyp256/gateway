@@ -52,7 +52,10 @@ func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 		}
 	}
 
-	for _, srv := range ctl.dnsServers {
+	ctl.dnsServersMux.RLock()
+	servers := ctl.dnsServers
+	ctl.dnsServersMux.RUnlock()
+	for _, srv := range servers {
 		resp, _, err := srv.Query(ctx, r)
 		if err != nil || resp == nil {
 			continue

@@ -11,7 +11,6 @@ var defaultConfig = Config{
 	LogLevel:  "debug",
 	DNSPort:   5453,
 	HTTPPort:  80,
-	Hosts:     map[string]netip.Addr{},
 	DBStorage: "db",
 	DNSServers: []DNSServer{
 		{
@@ -32,10 +31,9 @@ type Config struct {
 	// 存储目录
 	DBStorage string
 
-	// 上游dns 地址
+	// 上游 DNS 地址。仅用于首次启动时初始化数据库；
+	// 运行期以上游 DNS 页面/数据库中的配置为准，重启后不再回填。
 	DNSServers []DNSServer
-	// 静态解析
-	Hosts map[string]netip.Addr
 }
 
 type DNSServer struct {
