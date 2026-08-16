@@ -48,10 +48,6 @@ func NewServer(cfg config.Config) (*Server, error) {
 	}
 
 	d := dao.New(storage)
-	if err := seedDNSServers(d, cfg.DNSServers); err != nil {
-		_ = storage.Close()
-		return nil, fmt.Errorf("seed dns servers failed: %w", err)
-	}
 
 	ctl := controller.NewController(d, chi.NewRouter(), cfg)
 	return &Server{
@@ -60,51 +56,6 @@ func NewServer(cfg config.Config) (*Server, error) {
 		dnsPort:  cfg.DNSPort,
 		httpPort: cfg.HTTPPort,
 	}, nil
-}
-
-// seedDNSServers 首次启动时把 config 中的上游 DNS 默认值写入数据库，
-// 之后运行期以数据库/页面配置为准，config 不再参与。
-// 通过 meta 标记区分“尚未初始化”和“用户已清空全部上游”，避免重启时重复回填。
-func seedDNSServers(d *dao.Dao, servers []config.DNSServer) error {
-	initialized, err := d.DNSServersInitialized()
-	if err != nil {
-		return err
-	}
-	if initialized {
-		return nil
-	}
-	taken := map[string]bool{}
-	for i, s := range servers {
-		item := dao.DNSServer{
-			Type:     s.Type,
-			Server:   s.Server,
-			IP:       s.IP,
-			Insecure: s.Insecure,
-		}
-		item.Name = seedDNSServerName(s, i, taken)
-		if err := d.SetDNSServer(item); err != nil {
-			return err
-		}
-	}
-	return d.MarkDNSServersInitialized()
-}
-
-// seedDNSServerName 为 config 默认上游生成稳定的存储名称：
-// 优先用域名，其次 IP，最后 dns-序号；重名时追加 -2、-3 后缀。
-func seedDNSServerName(s config.DNSServer, idx int, taken map[string]bool) string {
-	base := s.Server
-	if base == "" && s.IP.IsValid() {
-		base = s.IP.String()
-	}
-	if base == "" {
-		base = fmt.Sprintf("dns-%d", idx+1)
-	}
-	name := base
-	for i := 2; taken[name]; i++ {
-		name = fmt.Sprintf("%s-%d", base, i)
-	}
-	taken[name] = true
-	return name
 }
 
 func (s *Server) Run(ctx context.Context) error {

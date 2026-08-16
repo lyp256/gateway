@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"strings"
 )
 
@@ -12,13 +11,6 @@ var defaultConfig = Config{
 	DNSPort:   5453,
 	HTTPPort:  80,
 	DBStorage: "db",
-	DNSServers: []DNSServer{
-		{
-			Type:   "doh",
-			Server: "doh.pub",
-			IP:     netip.MustParseAddr("1.12.12.12"),
-		},
-	},
 }
 
 type Config struct {
@@ -30,17 +22,6 @@ type Config struct {
 	DNSPort uint16
 	// 存储目录
 	DBStorage string
-
-	// 上游 DNS 地址。仅用于首次启动时初始化数据库；
-	// 运行期以上游 DNS 页面/数据库中的配置为准，重启后不再回填。
-	DNSServers []DNSServer
-}
-
-type DNSServer struct {
-	Type     string
-	IP       netip.Addr
-	Server   string
-	Insecure bool
 }
 
 func GetConfig() Config {
