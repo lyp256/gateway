@@ -122,6 +122,27 @@ func cmpUint8(a, b uint8) int {
 	return 0
 }
 
+func cmpInt(a, b int) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	default:
+		return 1
+	}
+}
+
 func cmpTime(a, b time.Time) int {
 	return a.Compare(b)
 }

@@ -26,6 +26,8 @@ import (
 var ErrNotExistOriginalDst = errors.New("not exist origin dest addr")
 
 func (ctl *controller) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+	// UDP 透明代理回包：从原始目的地址/端口回复客户端，避免源端口不匹配被丢弃。
+	w = ctl.dnsReplyRouter.wrap(w)
 	startTime := time.Now()
 	success := ctl.queryDNS(ctx, w, r)
 	d := time.Since(startTime).Seconds()
@@ -74,10 +76,27 @@ func (ctl *controller) queryDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 	resp := new(dns.Msg)
 	dnsutil.SetReply(resp, r)
 	resp.Rcode = dns.RcodeServerFailure
-	if err := resp.Pack(); err == nil {
-		_, _ = io.Copy(w, resp)
-	}
+	writeDNSWire(w, resp)
 	return false
+}
+
+// writeDNSWire 把应答消息通过 ResponseWriter 写回。
+// 不能用 io.Copy(w, msg)：miekg 的 Msg.WriteTo 对 UDP 走 *net.UDPConn 快速路径，
+// 直接经监听 socket 发回，绕过控制面的透明回包路由，导致回包源端口与查询端口不一致。
+func writeDNSWire(w dns.ResponseWriter, m *dns.Msg) {
+	// 始终重新 Pack：调用方（如缓存应答）会修改 ID/TTL 等字段，
+	// 而 m.Data 可能是修改前的陈旧字节。
+	if err := m.Pack(); err != nil {
+		slog.Debug("pack dns response", "err", err)
+		return
+	}
+	// UDP：裸报文交给透明回包路由（w 已被 ServeDNS 包装）。
+	// 其它连接类型：维持 miekg 的 2 字节长度前缀分帧。
+	if _, ok := w.Conn().(*net.UDPConn); ok {
+		_, _ = w.Write(m.Data)
+		return
+	}
+	_, _ = io.Copy(w, m)
 }
 
 func (ctl *controller) writeDNSResponse(w dns.ResponseWriter, request, response *dns.Msg) {
@@ -100,9 +119,7 @@ func (ctl *controller) writeDNSResponse(w dns.ResponseWriter, request, response 
 		ctl.dnsToRoute(name, ips...)
 	}
 	response.ID = request.ID
-	if err := response.Pack(); err == nil {
-		_, _ = io.Copy(w, response)
-	}
+	writeDNSWire(w, response)
 }
 
 func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, server netip.AddrPort) {
@@ -112,9 +129,7 @@ func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 		resp := new(dns.Msg)
 		dnsutil.SetReply(resp, r)
 		resp.Rcode = dns.RcodeServerFailure
-		if err := resp.Pack(); err == nil {
-			_, _ = io.Copy(w, resp)
-		}
+		writeDNSWire(w, resp)
 		return
 	}
 	if resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
@@ -142,14 +157,10 @@ func (ctl *controller) proxyDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 		for name, ips := range nameip {
 			ctl.dnsToRoute(name, ips...)
 		}
-		if err := resp.Pack(); err == nil {
-			_, _ = io.Copy(w, resp)
-		}
+		writeDNSWire(w, resp)
 		return
 	}
-	if err := resp.Pack(); err == nil {
-		_, _ = io.Copy(w, resp)
-	}
+	writeDNSWire(w, resp)
 }
 
 func (ctl *controller) dnsToRoute(name string, ips ...netip.Addr) {

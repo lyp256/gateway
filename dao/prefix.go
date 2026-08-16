@@ -10,6 +10,7 @@ const (
 	PrefixEgress     = "egress:"
 	PrefixWhitelist  = "wl:"
 	PrefixDNSServer  = "dns:"
+	PrefixNicMount   = "nicm:"
 	PrefixMeta       = "meta:"
 )
 

@@ -330,7 +330,7 @@ h2 {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -419,6 +419,15 @@ h2 {
 
 .stat-card.rose::after {
   background: #df9093;
+}
+
+.stat-card.cyan .stat-icon {
+  color: #0f6b84;
+  background: #e3f4fa;
+}
+
+.stat-card.cyan::after {
+  background: #6fc3dc;
 }
 
 .overview-grid {
@@ -770,6 +779,21 @@ code {
   margin-left: 7px;
 }
 
+.nic-index {
+  display: block;
+  margin-top: 3px;
+  color: #9aa29b;
+  font-size: 11px;
+}
+
+.nic-addresses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 220px;
+  padding: 10px 0;
+}
+
 .dns-answers {
   display: flex;
   flex-wrap: wrap;
@@ -957,6 +981,65 @@ small {
   height: 16px;
   margin: 0;
   accent-color: #16755d;
+}
+
+.nic-settings {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  background: #eef3ec;
+  border: 1px solid #dce5da;
+  border-radius: 6px;
+}
+
+.mount-all-toggle {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  margin: 0;
+  color: #4d574e;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.mount-all-toggle input[type="checkbox"],
+.auto-mount-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #16755d;
+}
+
+.mount-all-toggle.enabled span {
+  color: #16755d;
+}
+
+.nic-hint {
+  margin: 0;
+  color: #778177;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.auto-mount-check {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+}
+
+.auto-mount-check input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.auto-mount-check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: .4;
 }
 
 .dns-test-result {

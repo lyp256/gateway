@@ -21,6 +21,11 @@
 #define MAX_EGRESS_RULES 256
 #define MAX_WHITELIST_ENTRIES 65536
 
+// DNS 透明代理 mark：ingress 重定向成功后在 skb 上打该 mark，
+// 控制面配套安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
+// 把目的地址非本机的 DNS 查询导向本地投递（TPROXY 标准做法）。
+#define DNS_TPROXY_FWMARK 0x1
+
 // egress 规则类型：route_lpm_map 只存 8 位 egress 索引，
 // 具体处理方式（打 fwmark 或 tproxy）由 egress_map 决定。
 enum egress_rule_type
@@ -290,12 +295,13 @@ static __always_inline void report_tcp_stream_event(struct __sk_buff *skb, struc
 
 // 在 TC ingress 上把 UDP 53 的 DNS 包交给控制面 DNS server 的本地监听 socket。
 // 使用控制面下发的目标地址/端口做 socket 查找（目标必须是本机 DNS listener），
-// 原包的目的地址/端口不做改写，DNS server 可通过 IP_RECVORIGDSTADDR 拿到原目的。
-// 查找/分配失败时放行（fail-open）。
-static __always_inline int dns_redirect_udp(struct __sk_buff *skb,
-                                            struct iphdr *iph,
-                                            struct udphdr *uh,
-                                            struct dns_redirect_target *target)
+// 原包的目的地址/端口不做改写，DNS server 可通过 IP_RECVORIGDSTADDR 拿到原目的，
+// 并据此从原始目的地址/端口回包（透明代理语义）。
+// 返回 0 表示 socket 分配成功；失败返回负数，由调用方决定放行（fail-open）。
+static __always_inline long dns_redirect_udp(struct __sk_buff *skb,
+                                             struct iphdr *iph,
+                                             struct udphdr *uh,
+                                             struct dns_redirect_target *target)
 {
     struct bpf_sock_tuple tuple = {};
 
@@ -310,12 +316,11 @@ static __always_inline int dns_redirect_udp(struct __sk_buff *skb,
     struct bpf_sock *sk = bpf_sk_lookup_udp(skb, &tuple, sizeof(tuple.ipv4),
                                             BPF_F_CURRENT_NETNS, 0);
     if (!sk)
-        return TC_ACT_OK;
+        return -1;
 
     long err = bpf_sk_assign(skb, sk, 0);
     bpf_sk_release(sk);
-    (void)err;
-    return TC_ACT_OK;
+    return err;
 }
 
 // 在 TC ingress 上把匹配 tproxy egress 的 TCP 包交给本地透明监听 socket。
@@ -413,7 +418,12 @@ int tc_gateway_filter(struct __sk_buff *skb)
             __u32 dns_key = 0;
             struct dns_redirect_target *target = bpf_map_lookup_elem(&dns_redirect_map, &dns_key);
             if (target && target->enabled)
-                dns_redirect_udp(skb, iph, uh, target);
+            {
+                // 重定向成功后在 skb 上打 DNS mark，控制面策略路由据此把
+                // 目的地址非本机的查询导向本地投递（本机地址的查询本身就会本地投递）。
+                if (dns_redirect_udp(skb, iph, uh, target) == 0)
+                    skb->mark = DNS_TPROXY_FWMARK;
+            }
         }
         return TC_ACT_OK;
     }

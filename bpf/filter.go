@@ -25,6 +25,11 @@ const (
 
 	// DnsRedirectMapKey 是 dns_redirect_map 的单槽 key。
 	DnsRedirectMapKey uint32 = 0
+
+	// DnsTproxyFwmark 是 DNS 透明代理 mark，与 filter.c 中 DNS_TPROXY_FWMARK 一致。
+	// 控制面据此安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
+	// 把目的地址非本机的 DNS 查询导向本地投递。
+	DnsTproxyFwmark = 0x1
 )
 
 func ToFilterBpfLpmTrieKeyV4(ip netip.Prefix) FilterBpfLpmTrieKeyV4 {

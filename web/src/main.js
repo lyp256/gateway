@@ -6,6 +6,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   ArrowUpRight,
+  Cable,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -102,7 +103,7 @@ function dnsTypeLabel(type) {
   return ({ udp: 'UDP', dot: 'DoT', doh: 'DoH' })[type] || 'UDP'
 }
 
-const viewIds = new Set(['overview', 'egresses', 'domains', 'cidrs', 'hosts', 'dns-servers', 'whitelist', 'routes', 'dns-cache'])
+const viewIds = new Set(['overview', 'nics', 'egresses', 'domains', 'cidrs', 'hosts', 'dns-servers', 'whitelist', 'routes', 'dns-cache'])
 
 function viewFromHash(hash = window.location.hash) {
   const view = hash.replace(/^#\/?/, '').split(/[/?]/, 1)[0]
@@ -204,6 +205,7 @@ const App = {
     ArrowUp,
     ArrowUpDown,
     ArrowUpRight,
+    Cable,
     Check,
     ChevronLeft,
     ChevronRight,
@@ -235,6 +237,11 @@ const App = {
     const error = ref('')
     const notice = ref('')
     const lastUpdated = ref(null)
+    const nics = ref([])
+    const nicsLoading = ref(false)
+    const nicBusy = ref('')
+    const bpfStatus = ref(null)
+    const bpfSettings = ref(null)
     const modal = ref('')
     const editing = ref(null)
     const egressForm = reactive(emptyEgress())
@@ -322,6 +329,7 @@ const App = {
 
     const navItems = [
       { id: 'overview', label: '总览', icon: 'Activity' },
+      { id: 'nics', label: '网卡', icon: 'Cable' },
       { id: 'egresses', label: '出口', icon: 'Network' },
       { id: 'domains', label: '域名规则', icon: 'Globe2' },
       { id: 'cidrs', label: 'IP 规则', icon: 'Network' },
@@ -338,6 +346,7 @@ const App = {
       { label: 'IP 规则', value: listState.cidrs.total, icon: Network, tone: 'indigo' },
       { label: '静态 Hosts', value: listState.hosts.total, icon: Server, tone: 'amber' },
       { label: 'IPv4 路由', value: listState.routes.total, icon: Route, tone: 'rose' },
+      { label: 'eBPF 网卡', value: bpfStatus.value?.interfaces ?? 0, icon: Cable, tone: 'cyan' },
     ])
 
     const egressByName = computed(() => new Map(lookups.egresses.map((item) => [item.name, item])))
@@ -434,7 +443,7 @@ const App = {
         await Promise.all([
           loadList('egresses'), loadList('domains'), loadList('cidrs'), loadList('hosts'),
           loadList('dnsServers'), loadList('whitelist'), loadList('routes'), loadList('dnsCache'),
-          loadLookups(),
+          loadLookups(), loadNics(), loadBPFStatus(), loadBPFSettings(),
         ])
         Object.keys(dnsServerTest).forEach((name) => delete dnsServerTest[name])
         lastUpdated.value = new Date()
@@ -442,6 +451,72 @@ const App = {
         error.value = cause.message
       } finally {
         loading.value = false
+      }
+    }
+
+    async function loadNics() {
+      nicsLoading.value = true
+      try {
+        const items = await api('/nics?per_page=1000')
+        nics.value = Array.isArray(items) ? items : []
+      } finally {
+        nicsLoading.value = false
+      }
+    }
+
+    async function loadBPFStatus() {
+      bpfStatus.value = await api('/bpf/status').catch(() => null)
+    }
+
+    async function loadBPFSettings() {
+      bpfSettings.value = await api('/bpf/settings').catch(() => null)
+    }
+
+    async function toggleNic(nic) {
+      nicBusy.value = nic.name
+      clearMessage()
+      try {
+        await api(`/nics/${encodeURIComponent(nic.name)}/attach`, { method: nic.attached ? 'DELETE' : 'POST' })
+        notice.value = nic.attached ? `已解除 ${nic.name} 的 eBPF 挂载。` : `eBPF 已挂载到 ${nic.name}。`
+        await Promise.all([loadNics(), loadBPFStatus()])
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        nicBusy.value = ''
+      }
+    }
+
+    async function toggleAutoMount(nic) {
+      nicBusy.value = `auto:${nic.name}`
+      clearMessage()
+      try {
+        await api(`/nics/${encodeURIComponent(nic.name)}/auto-mount`, {
+          method: 'PUT',
+          body: JSON.stringify({ auto_mount: !nic.auto_mount }),
+        })
+        notice.value = nic.auto_mount
+          ? `已关闭 ${nic.name} 的自动挂载。`
+          : `${nic.name} 将在下次启动时自动挂载 eBPF。`
+        await Promise.all([loadNics(), loadBPFSettings()])
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        nicBusy.value = ''
+      }
+    }
+
+    async function toggleMountAll() {
+      const next = !bpfSettings.value?.mount_all
+      nicBusy.value = 'mount-all'
+      clearMessage()
+      try {
+        await api('/bpf/settings', { method: 'PUT', body: JSON.stringify({ mount_all: next }) })
+        notice.value = next ? '已启用全部挂载：下次启动将挂载所有可挂载网卡。' : '已关闭全部挂载。'
+        await Promise.all([loadNics(), loadBPFSettings()])
+      } catch (cause) {
+        error.value = cause.message
+      } finally {
+        nicBusy.value = ''
       }
     }
 
@@ -825,11 +900,11 @@ const App = {
     onBeforeUnmount(() => window.removeEventListener('hashchange', syncViewFromHash))
 
     return {
-      addForView, addLabel, canAdd, cidrForm, clearSearch, closeModal, currentView, dnsServerForm, dnsServerTest, dnsTestForm, dnsTesting, dnsTestResult, dnsTypeLabel, domainForm, egressDesc,
+      addForView, addLabel, bpfSettings, bpfStatus, canAdd, cidrForm, clearSearch, closeModal, currentView, dnsServerForm, dnsServerTest, dnsTestForm, dnsTesting, dnsTestResult, dnsTypeLabel, domainForm, egressDesc,
       egressByIndex, egressByName, egressForm, error, hexMark, hostForm, lastUpdated, loading, modal, modalTitle, navItems, notice,
-      listState, loadList, lookups, modalTestResult, modalTesting, navigate, openCidr, createDomainFromCache, openDNSServer, openDNSTest, openDomain, openEgress, openHost, openWhitelist, refresh, remove, runDNSTest, saveCidr, saveDNSServer,
+      listState, loadList, loadBPFStatus, loadBPFSettings, loadNics, lookups, modalTestResult, modalTesting, navigate, nics, nicsLoading, nicBusy, openCidr, createDomainFromCache, openDNSServer, openDNSTest, openDomain, openEgress, openHost, openWhitelist, refresh, remove, runDNSTest, saveCidr, saveDNSServer,
       saveDomain, saveEgress, saveHost, saveWhitelist, saving, selectedCidrEgress, selectedDomainEgress, stats, whitelistForm,
-      sortOptions, testDNSServerForm, testDNSServerRow, toggleSort, useDNSTestSource,
+      sortOptions, testDNSServerForm, testDNSServerRow, toggleAutoMount, toggleMountAll, toggleNic, toggleSort, useDNSTestSource,
     }
   },
   template: `
@@ -919,6 +994,47 @@ const App = {
               <CircleHelp :size="20" />
               <p>域名规则在 DNS 响应命中后写入当前 IPv4 路由快照；IP 规则直接按 CIDR 网段生效，不依赖 DNS 解析。出口配置当前保存 fwmark 与隧道参数，策略路由和隧道生命周期由后端后续接管。</p>
             </section>
+          </section>
+
+          <section v-else-if="currentView === 'nics'" class="view">
+            <div class="section-heading">
+              <div><p class="eyebrow">EBPF ATTACHMENTS</p><h2>网卡与 eBPF 挂载</h2></div>
+              <span class="item-count">{{ nics.length }} 项</span>
+            </div>
+            <div class="nic-settings">
+              <label class="mount-all-toggle" :class="{ enabled: bpfSettings?.mount_all }">
+                <input type="checkbox" :checked="bpfSettings?.mount_all" :disabled="nicBusy === 'mount-all'" @change="toggleMountAll" />
+                <span>启动时全部挂载</span>
+              </label>
+              <p class="nic-hint">勾选“自动挂载”的网卡会在程序启动时自动挂载 eBPF；未勾选任何网卡且未开启全部挂载时，保持挂载默认路由网卡。</p>
+            </div>
+            <div v-if="bpfStatus && !bpfStatus.ready" class="alert alert-error"><AlertCircle :size="18" /><span>eBPF 程序尚未就绪，暂时无法挂载新网卡；已有挂载仍可解除。</span></div>
+            <div v-if="nicsLoading && !nics.length" class="loading-state"><LoaderCircle :size="24" class="spinning" /><span>正在读取网卡信息</span></div>
+            <div v-else-if="nics.length" class="table-wrap"><table><thead><tr>
+              <th>网卡</th><th>状态</th><th>类型</th><th>MAC 地址</th><th>IP 地址</th><th>MTU</th><th>自动挂载</th><th>eBPF</th><th></th>
+            </tr></thead><tbody><tr v-for="nic in nics" :key="nic.name">
+              <td class="row-name">{{ nic.name }}<small class="nic-index">#{{ nic.index }}</small></td>
+              <td><span class="badge" :class="nic.state === 'up' ? 'badge-teal' : 'badge-neutral'">{{ nic.state }}</span></td>
+              <td class="muted">{{ nic.type }}</td>
+              <td><code>{{ nic.mac || '-' }}</code></td>
+              <td class="nic-addresses"><code v-for="addr in nic.addresses" :key="addr">{{ addr }}</code><span v-if="!nic.addresses?.length" class="muted">-</span></td>
+              <td class="muted">{{ nic.mtu }}</td>
+              <td>
+                <label class="auto-mount-check" :class="{ checked: nic.auto_mount }" :title="nic.flags?.includes('loopback') ? 'loopback 不支持挂载' : '程序启动时自动挂载 eBPF 到该网卡'">
+                  <input type="checkbox" :checked="nic.auto_mount" :disabled="nic.flags?.includes('loopback') || nicBusy === 'auto:' + nic.name" @change="toggleAutoMount(nic)" />
+                </label>
+              </td>
+              <td><span class="badge" :class="nic.attached ? 'badge-lime' : 'badge-neutral'">{{ nic.attached ? '已挂载' : '未挂载' }}</span></td>
+              <td class="actions">
+                <button v-if="nic.attached" type="button" class="secondary-button" :disabled="nicBusy === nic.name" @click="toggleNic(nic)">
+                  <LoaderCircle v-if="nicBusy === nic.name" :size="15" class="spinning" /><X v-else :size="15" />解除挂载
+                </button>
+                <button v-else type="button" class="primary-button" :disabled="nicBusy === nic.name || !bpfStatus?.ready || nic.flags?.includes('loopback')" :title="nic.flags?.includes('loopback') ? 'loopback 不支持挂载' : '挂载 eBPF 到该网卡'" @click="toggleNic(nic)">
+                  <LoaderCircle v-if="nicBusy === nic.name" :size="15" class="spinning" /><Link2 v-else :size="15" />挂载
+                </button>
+              </td>
+            </tr></tbody></table></div>
+            <div v-else class="empty-state"><Cable :size="28" /><h2>未发现网卡</h2></div>
           </section>
 
           <section v-else-if="currentView === 'egresses'" class="view">

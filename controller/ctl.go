@@ -40,10 +40,13 @@ func NewController(storage *dao.Dao, e chi.Router, cfg config.Config) Controller
 		hosts:             hosts,
 		dnsServers:        []query.DNSQuerier{query.NewStatic(hosts, mux.RLocker())},
 		dnsCache:          newDNSCache(),
+		dnsReplyRouter:    newDNSReplyRouter(),
 		http:              e,
 		waitReadCh:        make(chan struct{}),
 		storage:           storage,
 		egressIndexByName: make(map[string]uint8),
+		attachedNics:      make(map[string]struct{}),
+		autoMountNics:     make(map[string]struct{}),
 	}
 	c.applyConfig(cfg)
 	c.initMetrics()
@@ -76,12 +79,23 @@ type controller struct {
 	egressNextIndex   uint8
 	// DNS 重定向目标（控制面配置，启动时同步到 dns_redirect_map）
 	dnsRedirectTarget bpf.FilterDnsRedirectTarget
+	// DNS 透明代理回包路由：按原始目的地址维护 IP_TRANSPARENT 回包 socket
+	dnsReplyRouter *dnsReplyRouter
 	// 源地址白名单（持久化在数据库，启动加载并同步到 src_whitelist_map，运行时可动态调整）
 	whitelistMux    sync.RWMutex
 	sourceWhitelist []netip.Prefix
 
 	// 网卡
-	netDevs []string
+	// eBPF 网卡挂载管理：bpfReady 表示数据面已加载完成，
+	// attachedNics 记录当前由本进程挂载的网卡名称。
+	nicMux   sync.RWMutex
+	bpfReady bool
+	// attachedNics 记录当前由本进程挂载的网卡名称。
+	attachedNics map[string]struct{}
+	// autoMountNics 记录勾选了“启动自动挂载”的网卡名称（持久化）。
+	autoMountNics map[string]struct{}
+	// mountAllNics 表示全局“启动时挂载全部可挂载网卡”开关（持久化）。
+	mountAllNics bool
 
 	//bpf 对象
 	bpf bpf.FilterObjects
@@ -135,6 +149,9 @@ func (ctl *controller) Run(ctx context.Context) error {
 		return err
 	}
 	if err := ctl.loadWhitelistFromStorage(); err != nil {
+		return err
+	}
+	if err := ctl.loadNicMountSettings(); err != nil {
 		return err
 	}
 

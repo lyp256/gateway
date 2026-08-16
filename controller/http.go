@@ -55,6 +55,14 @@ func (ctl *controller) registerHttpAPI() {
 	huma.Put(hapi, apiV1("/egresses"), ctl.createEgress)
 	huma.Put(hapi, apiV1("/egresses/{name}"), ctl.updateEgress)
 	huma.Delete(hapi, apiV1("/egresses/{name}"), ctl.deleteEgress)
+	// 网卡与 eBPF 挂载管理
+	huma.Get(hapi, apiV1("/nics"), ctl.getNics)
+	huma.Post(hapi, apiV1("/nics/{name}/attach"), ctl.attachNic)
+	huma.Delete(hapi, apiV1("/nics/{name}/attach"), ctl.detachNic)
+	huma.Put(hapi, apiV1("/nics/{name}/auto-mount"), ctl.setNicAutoMount)
+	huma.Get(hapi, apiV1("/bpf/settings"), ctl.getBPFSettings)
+	huma.Put(hapi, apiV1("/bpf/settings"), ctl.setBPFSettings)
+	huma.Get(hapi, apiV1("/bpf/status"), ctl.getBPFStatus)
 }
 
 func apiV1(r string) string {

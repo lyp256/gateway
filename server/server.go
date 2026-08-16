@@ -62,10 +62,18 @@ func (s *Server) Run(ctx context.Context) error {
 	defer s.storage.Close()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// DNS listener 使用透明代理选项：IP_TRANSPARENT + IP_RECVORIGDSTADDR。
+	// eBPF 重定向投递的包目的地址/端口保持原样，控制面据此拿到真实请求地址并从
+	// 原始目的地址/端口回包。
+	lc := net.ListenConfig{Control: controller.SetTransparentSocketOptions}
+	dnsPC, err := lc.ListenPacket(ctx, "udp", net.JoinHostPort("", strconv.Itoa(int(s.dnsPort))))
+	if err != nil {
+		return fmt.Errorf("listen dns udp: %w", err)
+	}
 	dnsSrv := &dns.Server{
-		Net:     "udp",
-		Addr:    net.JoinHostPort("", strconv.Itoa(int(s.dnsPort))),
-		Handler: s.c,
+		Net:        "udp",
+		PacketConn: dnsPC,
+		Handler:    s.c,
 	}
 
 	httpSrv := http.Server{
