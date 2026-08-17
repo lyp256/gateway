@@ -25,6 +25,8 @@
 // 控制面配套安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
 // 把目的地址非本机的 DNS 查询导向本地投递（TPROXY 标准做法）。
 #define DNS_TPROXY_FWMARK 0x1
+// TCP TPROXY 使用独立 mark，由控制面策略路由到本地透明 socket。
+#define TCP_TPROXY_FWMARK 0x2
 
 // egress 规则类型：route_lpm_map 只存 8 位 egress 索引，
 // 具体处理方式（打 fwmark 或 tproxy）由 egress_map 决定。
@@ -333,13 +335,24 @@ static __always_inline int tproxy_assign_tcp(struct __sk_buff *skb,
                                              struct egress_rule *rule)
 {
     struct bpf_sock_tuple tuple = {};
+    long err;
 
     tuple.ipv4.saddr = iph->saddr;
     tuple.ipv4.daddr = iph->daddr;
     tuple.ipv4.sport = th->source;
     tuple.ipv4.dport = th->dest;
-    // egress 配置了固定监听地址/端口时改写查找条件；
-    // 否则按原目的地址/端口查找（socket 需以 IP_TRANSPARENT 绑定）。
+    // 先按原始四元组查找。这样 SYN 之后的 ACK 和数据包会命中透明
+    // listener 创建的 request/已连接 socket，而不会又被交给 listener。
+    struct bpf_sock *sk = NULL;
+    if (!(th->syn && !th->ack)) {
+        sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4),
+                                BPF_F_CURRENT_NETNS, 0);
+        if (sk)
+            goto assign;
+    }
+
+    // 新 SYN 没有原始四元组对应的 socket 时，再按配置的本地 listener
+    // 地址和端口查找。全零配置保持原目的地址/端口，用于透明绑定场景。
     __u8 has_addr = rule->tproxy_addr[0] | rule->tproxy_addr[1] |
                     rule->tproxy_addr[2] | rule->tproxy_addr[3];
     if (has_addr)
@@ -348,14 +361,18 @@ static __always_inline int tproxy_assign_tcp(struct __sk_buff *skb,
     if (has_port)
         __builtin_memcpy(&tuple.ipv4.dport, rule->tproxy_port, 2);
 
-    struct bpf_sock *sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4),
-                                             BPF_F_CURRENT_NETNS, 0);
+    sk = bpf_skc_lookup_tcp(skb, &tuple, sizeof(tuple.ipv4),
+                            BPF_F_CURRENT_NETNS, 0);
     if (!sk)
         return TC_ACT_OK;
 
-    long err = bpf_sk_assign(skb, sk, 0);
+assign:
+    err = bpf_sk_assign(skb, sk, 0);
     bpf_sk_release(sk);
-    (void)err;
+    // sk_assign 只关联 socket，不改变内核后续路由。成功后必须打 mark，
+    // 由策略路由把原目的地址的包本地投递；失败时保持 fail-open。
+    if (err == 0)
+        skb->mark = TCP_TPROXY_FWMARK;
     return TC_ACT_OK;
 }
 

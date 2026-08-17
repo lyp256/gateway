@@ -30,6 +30,10 @@ const (
 	// 控制面据此安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
 	// 把目的地址非本机的 DNS 查询导向本地投递。
 	DnsTproxyFwmark = 0x1
+
+	// TcpTproxyFwmark 是 TCP egress tproxy 的透明代理 mark，与 filter.c 中
+	// TCP_TPROXY_FWMARK 一致。控制面把它路由到本地透明监听 socket。
+	TcpTproxyFwmark = 0x2
 )
 
 func ToFilterBpfLpmTrieKeyV4(ip netip.Prefix) FilterBpfLpmTrieKeyV4 {
@@ -104,7 +108,7 @@ func FromFilterBpfLpmTrieKeyV4(key FilterBpfLpmTrieKeyV4) netip.Prefix {
 type TcpStream struct {
 	Src        netip.AddrPort
 	Dest       netip.AddrPort
-	Mark       uint32 // FWMARK egress 实际写入的 mark；tproxy egress 为 0
+	Mark       uint32 // FWMARK egress 或透明代理本地投递实际写入的 mark
 	EgressIdx  uint8  // 命中路由的 egress 索引，对应 route_lpm_map value
 	EgressType uint8  // EgressRuleNone / EgressRuleFwmark / EgressRuleTproxy
 }

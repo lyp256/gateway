@@ -370,20 +370,25 @@ const App = {
 
     function syncViewFromHash() {
       const view = viewFromHash()
+      const changed = currentView.value !== view
       currentView.value = view
 
       const expectedHash = hashForView(view)
       if (window.location.hash !== expectedHash) {
         window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${expectedHash}`)
       }
+      if (changed) refresh(view)
     }
 
     function navigate(view) {
       if (!viewIds.has(view)) return
 
+      const changed = currentView.value !== view
       currentView.value = view
       const nextHash = hashForView(view)
       if (window.location.hash !== nextHash) window.location.hash = nextHash
+      // 设置 hash 后会触发 hashchange；这里先加载，避免切换时等待该事件。
+      if (changed) refresh(view)
     }
 
     // loadList 按列表当前的分页/排序/搜索状态拉取一页数据；
@@ -411,12 +416,13 @@ const App = {
       }
     }
 
-    async function loadLookups() {
-      const [egresses, dnsServers] = await Promise.all([
-        api('/egresses?per_page=1000'),
-        api('/dns/servers?per_page=1000'),
-      ])
+    async function loadEgressLookup() {
+      const egresses = await api('/egresses?per_page=1000')
       lookups.egresses = Array.isArray(egresses) ? egresses : []
+    }
+
+    async function loadDNSServerLookup() {
+      const dnsServers = await api('/dns/servers?per_page=1000')
       lookups.dnsServers = Array.isArray(dnsServers) ? dnsServers : []
     }
 
@@ -436,16 +442,32 @@ const App = {
       loadList(key, 1)
     }
 
-    async function refresh() {
+    // 按当前视图刷新，避免切换列表时读取无关列表。
+    async function refresh(view = currentView.value) {
       clearMessage()
       loading.value = true
       try {
-        await Promise.all([
-          loadList('egresses'), loadList('domains'), loadList('cidrs'), loadList('hosts'),
-          loadList('dnsServers'), loadList('whitelist'), loadList('routes'), loadList('dnsCache'),
-          loadLookups(), loadNics(), loadBPFStatus(), loadBPFSettings(),
-        ])
-        Object.keys(dnsServerTest).forEach((name) => delete dnsServerTest[name])
+        const listKey = {
+          egresses: 'egresses', domains: 'domains', cidrs: 'cidrs', hosts: 'hosts',
+          'dns-servers': 'dnsServers', whitelist: 'whitelist', routes: 'routes', 'dns-cache': 'dnsCache',
+        }[view]
+        const requests = listKey ? [loadList(listKey)] : []
+
+        if (view === 'overview') {
+          requests.push(
+            loadList('egresses'), loadList('domains'), loadList('cidrs'), loadList('hosts'),
+            loadList('whitelist'), loadList('routes'), loadEgressLookup(), loadDNSServerLookup(), loadBPFStatus(),
+          )
+        } else if (view === 'nics') {
+          requests.push(loadNics(), loadBPFStatus(), loadBPFSettings())
+        } else if (['domains', 'cidrs', 'routes', 'dns-cache'].includes(view)) {
+          requests.push(loadEgressLookup())
+        } else if (view === 'dns-servers') {
+          requests.push(loadDNSServerLookup())
+          Object.keys(dnsServerTest).forEach((name) => delete dnsServerTest[name])
+        }
+
+        await Promise.all(requests)
         lastUpdated.value = new Date()
       } catch (cause) {
         error.value = cause.message

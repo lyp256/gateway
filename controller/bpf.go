@@ -41,7 +41,7 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 		ctl.nicMux.Lock()
 		ctl.bpfReady = false
 		ctl.nicMux.Unlock()
-		removeDnsTproxyRouting()
+		removeTproxyRouting()
 		ctl.detachAllNics()
 		ctl.bpf.Close()
 	}()
@@ -74,6 +74,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 
 	// DNS 透明代理策略路由：把带 DNS mark 的查询导向本地投递。
 	if err := ensureDnsTproxyRouting(); err != nil {
+		return err
+	}
+	if err := ensureTcpTproxyRouting(); err != nil {
 		return err
 	}
 
@@ -389,9 +392,21 @@ func clearEbpfProgFromLink(link netlink.Link, progName string) error {
 // 该表内的 local 路由把目的地址非本机的查询导向本地投递（TPROXY 标准做法）。
 const dnsTproxyRuleTable = 100
 
+// tcpTproxyRuleTable 与 DNS 透明代理表分离，避免不同透明代理流量共享 mark。
+const tcpTproxyRuleTable = 101
+
 // ensureDnsTproxyRouting 安装 DNS 透明代理所需的 fwmark 策略路由规则与 local 路由。
 // 幂等：已存在时跳过，避免重复添加。
 func ensureDnsTproxyRouting() error {
+	return ensureTproxyRouting(bpf.DnsTproxyFwmark, dnsTproxyRuleTable, "dns")
+}
+
+// ensureTcpTproxyRouting 安装 TCP egress tproxy 所需的本地投递路由。
+func ensureTcpTproxyRouting() error {
+	return ensureTproxyRouting(bpf.TcpTproxyFwmark, tcpTproxyRuleTable, "tcp")
+}
+
+func ensureTproxyRouting(mark uint32, table int, kind string) error {
 	// ip rule add fwmark <mark> lookup <table>
 	rules, err := netlink.RuleList(netlink.FAMILY_V4)
 	if err != nil {
@@ -399,7 +414,7 @@ func ensureDnsTproxyRouting() error {
 	}
 	foundRule := false
 	for _, r := range rules {
-		if r.Family == unix.AF_INET && r.Mark == bpf.DnsTproxyFwmark && r.Table == dnsTproxyRuleTable {
+		if r.Family == unix.AF_INET && r.Mark == mark && r.Table == table {
 			foundRule = true
 			break
 		}
@@ -407,14 +422,14 @@ func ensureDnsTproxyRouting() error {
 	if !foundRule {
 		rule := netlink.NewRule()
 		rule.Family = unix.AF_INET
-		rule.Mark = bpf.DnsTproxyFwmark
+		rule.Mark = mark
 		fullMask := uint32(0xffffffff)
 		rule.Mask = &fullMask
-		rule.Table = dnsTproxyRuleTable
+		rule.Table = table
 		if err := netlink.RuleAdd(rule); err != nil && !errors.Is(err, unix.EEXIST) {
-			return fmt.Errorf("add dns tproxy ip rule: %w", err)
+			return fmt.Errorf("add %s tproxy ip rule: %w", kind, err)
 		}
-		slog.Info("dns tproxy ip rule installed", "mark", bpf.DnsTproxyFwmark, "table", dnsTproxyRuleTable)
+		slog.Info("tproxy ip rule installed", "kind", kind, "mark", mark, "table", table)
 	}
 
 	// ip route add local 0.0.0.0/0 dev lo table <table>
@@ -423,9 +438,9 @@ func ensureDnsTproxyRouting() error {
 		return fmt.Errorf("lookup lo: %w", err)
 	}
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4,
-		&netlink.Route{Table: dnsTproxyRuleTable}, netlink.RT_FILTER_TABLE)
+		&netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
 	if err != nil {
-		return fmt.Errorf("list dns tproxy routes: %w", err)
+		return fmt.Errorf("list %s tproxy routes: %w", kind, err)
 	}
 	foundRoute := false
 	for _, rt := range routes {
@@ -437,15 +452,15 @@ func ensureDnsTproxyRouting() error {
 	if !foundRoute {
 		route := &netlink.Route{
 			LinkIndex: lo.Attrs().Index,
-			Table:     dnsTproxyRuleTable,
+			Table:     table,
 			Type:      unix.RTN_LOCAL,
 			Scope:     netlink.SCOPE_HOST,
 			Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
 		}
 		if err := netlink.RouteAdd(route); err != nil && !errors.Is(err, unix.EEXIST) {
-			return fmt.Errorf("add dns tproxy local route: %w", err)
+			return fmt.Errorf("add %s tproxy local route: %w", kind, err)
 		}
-		slog.Info("dns tproxy local route installed", "table", dnsTproxyRuleTable)
+		slog.Info("tproxy local route installed", "kind", kind, "table", table)
 	}
 	return nil
 }
@@ -458,12 +473,17 @@ func isDefaultV4Route(ipNet *net.IPNet) bool {
 	return bits == 32 && ones == 0
 }
 
-// removeDnsTproxyRouting 清理 ensureDnsTproxyRouting 安装的规则与路由，服务退出时调用。
-func removeDnsTproxyRouting() {
+// removeTproxyRouting 清理 DNS 和 TCP 透明代理安装的规则与路由，服务退出时调用。
+func removeTproxyRouting() {
+	removeTproxyRoutingFor(bpf.DnsTproxyFwmark, dnsTproxyRuleTable)
+	removeTproxyRoutingFor(bpf.TcpTproxyFwmark, tcpTproxyRuleTable)
+}
+
+func removeTproxyRoutingFor(mark uint32, table int) {
 	rules, err := netlink.RuleList(netlink.FAMILY_V4)
 	if err == nil {
 		for _, r := range rules {
-			if r.Family == unix.AF_INET && r.Mark == bpf.DnsTproxyFwmark && r.Table == dnsTproxyRuleTable {
+			if r.Family == unix.AF_INET && r.Mark == mark && r.Table == table {
 				if err := netlink.RuleDel(&r); err != nil && !errors.Is(err, unix.ENOENT) {
 					slog.Error("remove dns tproxy ip rule", "err", err)
 				}
@@ -478,7 +498,7 @@ func removeDnsTproxyRouting() {
 		return
 	}
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4,
-		&netlink.Route{Table: dnsTproxyRuleTable}, netlink.RT_FILTER_TABLE)
+		&netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		slog.Error("list dns tproxy routes for cleanup", "err", err)
 		return
