@@ -36,6 +36,12 @@ type FilterEgressRule struct {
 	Pad2       [2]uint8
 }
 
+type FilterTproxyConfig struct {
+	_         structs.HostLayout
+	DnsFwmark uint32
+	TcpFwmark uint32
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
@@ -45,6 +51,7 @@ const (
 	FilterMapEventsRingbuf    = "events_ringbuf"
 	FilterMapRouteLpmMap      = "route_lpm_map"
 	FilterMapSrcWhitelistMap  = "src_whitelist_map"
+	FilterMapTproxyConfigMap  = "tproxy_config_map"
 	FilterProgTcGatewayFilter = "tc_gateway_filter"
 )
 
@@ -102,6 +109,7 @@ type FilterMapSpecs struct {
 	EventsRingbuf   *ebpf.MapSpec `ebpf:"events_ringbuf"`
 	RouteLpmMap     *ebpf.MapSpec `ebpf:"route_lpm_map"`
 	SrcWhitelistMap *ebpf.MapSpec `ebpf:"src_whitelist_map"`
+	TproxyConfigMap *ebpf.MapSpec `ebpf:"tproxy_config_map"`
 }
 
 // FilterVariableSpecs contains global variables before they are loaded into the kernel.
@@ -135,6 +143,7 @@ type FilterMaps struct {
 	EventsRingbuf   *ebpf.Map `ebpf:"events_ringbuf"`
 	RouteLpmMap     *ebpf.Map `ebpf:"route_lpm_map"`
 	SrcWhitelistMap *ebpf.Map `ebpf:"src_whitelist_map"`
+	TproxyConfigMap *ebpf.Map `ebpf:"tproxy_config_map"`
 }
 
 func (m *FilterMaps) Close() error {
@@ -144,6 +153,7 @@ func (m *FilterMaps) Close() error {
 		m.EventsRingbuf,
 		m.RouteLpmMap,
 		m.SrcWhitelistMap,
+		m.TproxyConfigMap,
 	)
 }
 

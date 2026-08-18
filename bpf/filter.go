@@ -26,15 +26,24 @@ const (
 	// DnsRedirectMapKey 是 dns_redirect_map 的单槽 key。
 	DnsRedirectMapKey uint32 = 0
 
-	// DnsTproxyFwmark 是 DNS 透明代理 mark，与 filter.c 中 DNS_TPROXY_FWMARK 一致。
-	// 控制面据此安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
-	// 把目的地址非本机的 DNS 查询导向本地投递。
-	DnsTproxyFwmark = 0x1
+	// TproxyConfigMapKey 是 tproxy_config_map 的单槽 key。
+	TproxyConfigMapKey uint32 = 0
 
-	// TcpTproxyFwmark 是 TCP egress tproxy 的透明代理 mark，与 filter.c 中
-	// TCP_TPROXY_FWMARK 一致。控制面把它路由到本地透明监听 socket。
-	TcpTproxyFwmark = 0x2
+	// DefaultDnsTproxyFwmark 和 DefaultTcpTproxyFwmark 保持原有默认策略路由标记。
+	DefaultDnsTproxyFwmark uint32 = 0x1
+	DefaultTcpTproxyFwmark uint32 = 0x2
 )
+
+// NewTproxyConfig 构造数据面 TPROXY mark 配置。
+func NewTproxyConfig(dnsFwmark, tcpFwmark uint32) (FilterTproxyConfig, error) {
+	if dnsFwmark == 0 || tcpFwmark == 0 {
+		return FilterTproxyConfig{}, fmt.Errorf("tproxy fwmarks must be non-zero")
+	}
+	if dnsFwmark == tcpFwmark {
+		return FilterTproxyConfig{}, fmt.Errorf("dns and tcp tproxy fwmarks must differ")
+	}
+	return FilterTproxyConfig{DnsFwmark: dnsFwmark, TcpFwmark: tcpFwmark}, nil
+}
 
 func ToFilterBpfLpmTrieKeyV4(ip netip.Prefix) FilterBpfLpmTrieKeyV4 {
 	return FilterBpfLpmTrieKeyV4{

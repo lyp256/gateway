@@ -43,6 +43,26 @@ func TestNewFwmarkEgressRule(t *testing.T) {
 	}
 }
 
+func TestNewTproxyConfig(t *testing.T) {
+	config, err := NewTproxyConfig(0x101, 0x102)
+	if err != nil {
+		t.Fatalf("new tproxy config: %v", err)
+	}
+	if config.DnsFwmark != 0x101 || config.TcpFwmark != 0x102 {
+		t.Fatalf("tproxy config = %+v, want dns 0x101 tcp 0x102", config)
+	}
+
+	if _, err := NewTproxyConfig(0, 0x102); err == nil {
+		t.Fatal("zero DNS mark should be rejected")
+	}
+	if _, err := NewTproxyConfig(0x101, 0); err == nil {
+		t.Fatal("zero TCP mark should be rejected")
+	}
+	if _, err := NewTproxyConfig(0x101, 0x101); err == nil {
+		t.Fatal("duplicate marks should be rejected")
+	}
+}
+
 func TestNewDnsRedirectTarget(t *testing.T) {
 	target, err := NewDnsRedirectTarget(netip.MustParseAddr("127.0.0.1"), 5453)
 	if err != nil {

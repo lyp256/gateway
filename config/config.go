@@ -11,6 +11,10 @@ var defaultConfig = Config{
 	DNSPort:   5453,
 	HTTPPort:  80,
 	DBStorage: "db",
+	// Keep the original marks as defaults while allowing deployments to avoid
+	// collisions with their existing policy-routing rules.
+	DNSTproxyFwmark: 0x1,
+	TCPTproxyFwmark: 0x2,
 }
 
 type Config struct {
@@ -20,6 +24,9 @@ type Config struct {
 	HTTPPort uint16
 	// dns 服务监听地址
 	DNSPort uint16
+	// DNS/TCP 透明代理使用的策略路由 mark。
+	DNSTproxyFwmark uint32
+	TCPTproxyFwmark uint32
 	// 存储目录
 	DBStorage string
 }

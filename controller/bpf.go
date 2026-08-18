@@ -41,7 +41,7 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 		ctl.nicMux.Lock()
 		ctl.bpfReady = false
 		ctl.nicMux.Unlock()
-		removeTproxyRouting()
+		ctl.removeTproxyRouting()
 		ctl.detachAllNics()
 		ctl.bpf.Close()
 	}()
@@ -50,6 +50,9 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 	ctl.syncEgressMapToBPF()
 	// DNS 重定向目标与源地址白名单由控制面配置下发。
 	ctl.syncDnsRedirectToBPF()
+	if err := ctl.syncTproxyConfigToBPF(); err != nil {
+		return err
+	}
 	ctl.syncWhitelistToBPF()
 
 	// 启动时按自动挂载配置挂载初始网卡；未勾选任何网卡时退化为默认路由网卡。
@@ -73,10 +76,10 @@ func (ctl *controller) bpfServer(ctx context.Context) error {
 	ctl.syncRoutesToBPF()
 
 	// DNS 透明代理策略路由：把带 DNS mark 的查询导向本地投递。
-	if err := ensureDnsTproxyRouting(); err != nil {
+	if err := ensureDnsTproxyRouting(ctl.tproxyConfig.DnsFwmark); err != nil {
 		return err
 	}
-	if err := ensureTcpTproxyRouting(); err != nil {
+	if err := ensureTcpTproxyRouting(ctl.tproxyConfig.TcpFwmark); err != nil {
 		return err
 	}
 
@@ -196,6 +199,18 @@ func (ctl *controller) syncDnsRedirectToBPF() {
 		return
 	}
 	slog.Info("dns redirect target synced", "enabled", ctl.dnsRedirectTarget.Enabled != 0)
+}
+
+// syncTproxyConfigToBPF 把 DNS/TCP TPROXY mark 写入 tproxy_config_map。
+func (ctl *controller) syncTproxyConfigToBPF() error {
+	if ctl.bpf.FilterMaps.TproxyConfigMap == nil {
+		return errors.New("tproxy configuration map is unavailable")
+	}
+	if err := ctl.bpf.FilterMaps.TproxyConfigMap.Put(uint32(bpf.TproxyConfigMapKey), ctl.tproxyConfig); err != nil {
+		return fmt.Errorf("sync tproxy configuration to ebpf: %w", err)
+	}
+	slog.Info("tproxy configuration synced", "dns_fwmark", ctl.tproxyConfig.DnsFwmark, "tcp_fwmark", ctl.tproxyConfig.TcpFwmark)
+	return nil
 }
 
 // syncWhitelistToBPF 把配置的源地址白名单全量同步到 src_whitelist_map，
@@ -388,7 +403,7 @@ func clearEbpfProgFromLink(link netlink.Link, progName string) error {
 }
 
 // dnsTproxyRuleTable 是 DNS 透明代理使用的策略路由表，与脚本 scripts/dns-proxy-up.sh 一致。
-// eBPF 在 DNS 重定向成功时为 skb 打上 bpf.DnsTproxyFwmark，
+// eBPF 在 DNS 重定向成功时为 skb 打上控制面配置的 DNS TPROXY mark，
 // 该表内的 local 路由把目的地址非本机的查询导向本地投递（TPROXY 标准做法）。
 const dnsTproxyRuleTable = 100
 
@@ -397,13 +412,13 @@ const tcpTproxyRuleTable = 101
 
 // ensureDnsTproxyRouting 安装 DNS 透明代理所需的 fwmark 策略路由规则与 local 路由。
 // 幂等：已存在时跳过，避免重复添加。
-func ensureDnsTproxyRouting() error {
-	return ensureTproxyRouting(bpf.DnsTproxyFwmark, dnsTproxyRuleTable, "dns")
+func ensureDnsTproxyRouting(mark uint32) error {
+	return ensureTproxyRouting(mark, dnsTproxyRuleTable, "dns")
 }
 
 // ensureTcpTproxyRouting 安装 TCP egress tproxy 所需的本地投递路由。
-func ensureTcpTproxyRouting() error {
-	return ensureTproxyRouting(bpf.TcpTproxyFwmark, tcpTproxyRuleTable, "tcp")
+func ensureTcpTproxyRouting(mark uint32) error {
+	return ensureTproxyRouting(mark, tcpTproxyRuleTable, "tcp")
 }
 
 func ensureTproxyRouting(mark uint32, table int, kind string) error {
@@ -474,9 +489,9 @@ func isDefaultV4Route(ipNet *net.IPNet) bool {
 }
 
 // removeTproxyRouting 清理 DNS 和 TCP 透明代理安装的规则与路由，服务退出时调用。
-func removeTproxyRouting() {
-	removeTproxyRoutingFor(bpf.DnsTproxyFwmark, dnsTproxyRuleTable)
-	removeTproxyRoutingFor(bpf.TcpTproxyFwmark, tcpTproxyRuleTable)
+func (ctl *controller) removeTproxyRouting() {
+	removeTproxyRoutingFor(ctl.tproxyConfig.DnsFwmark, dnsTproxyRuleTable)
+	removeTproxyRoutingFor(ctl.tproxyConfig.TcpFwmark, tcpTproxyRuleTable)
 }
 
 func removeTproxyRoutingFor(mark uint32, table int) {

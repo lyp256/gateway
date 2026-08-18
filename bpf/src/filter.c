@@ -21,12 +21,12 @@
 #define MAX_EGRESS_RULES 256
 #define MAX_WHITELIST_ENTRIES 65536
 
-// DNS 透明代理 mark：ingress 重定向成功后在 skb 上打该 mark，
-// 控制面配套安装 `ip rule add fwmark <mark> lookup <table>` + local 路由，
-// 把目的地址非本机的 DNS 查询导向本地投递（TPROXY 标准做法）。
-#define DNS_TPROXY_FWMARK 0x1
-// TCP TPROXY 使用独立 mark，由控制面策略路由到本地透明 socket。
-#define TCP_TPROXY_FWMARK 0x2
+// DNS/TCP TPROXY mark 由控制面下发。两者必须使用不同的非零值，
+// 以免策略路由将无标记流量或另一类透明代理流量错误地本地投递。
+struct tproxy_config {
+    __u32 dns_fwmark;
+    __u32 tcp_fwmark;
+};
 
 // egress 规则类型：route_lpm_map 只存 8 位 egress 索引，
 // 具体处理方式（打 fwmark 或 tproxy）由 egress_map 决定。
@@ -178,6 +178,15 @@ struct
     __type(key, __u32);
     __type(value, struct dns_redirect_target);
 } dns_redirect_map SEC(".maps");
+
+// TPROXY 配置表：单槽，由控制面下发 DNS/TCP 的策略路由 mark。
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct tproxy_config);
+} tproxy_config_map SEC(".maps");
 
 // egress 规则表：key 为 egress 索引（0-255），与 route_lpm_map 的 value 对应。
 struct
@@ -371,8 +380,12 @@ assign:
     bpf_sk_release(sk);
     // sk_assign 只关联 socket，不改变内核后续路由。成功后必须打 mark，
     // 由策略路由把原目的地址的包本地投递；失败时保持 fail-open。
-    if (err == 0)
-        skb->mark = TCP_TPROXY_FWMARK;
+    if (err == 0) {
+        __u32 config_key = 0;
+        struct tproxy_config *config = bpf_map_lookup_elem(&tproxy_config_map, &config_key);
+        if (config)
+            skb->mark = config->tcp_fwmark;
+    }
     return TC_ACT_OK;
 }
 
@@ -438,8 +451,12 @@ int tc_gateway_filter(struct __sk_buff *skb)
             {
                 // 重定向成功后在 skb 上打 DNS mark，控制面策略路由据此把
                 // 目的地址非本机的查询导向本地投递（本机地址的查询本身就会本地投递）。
-                if (dns_redirect_udp(skb, iph, uh, target) == 0)
-                    skb->mark = DNS_TPROXY_FWMARK;
+                if (dns_redirect_udp(skb, iph, uh, target) == 0) {
+                    __u32 config_key = 0;
+                    struct tproxy_config *config = bpf_map_lookup_elem(&tproxy_config_map, &config_key);
+                    if (config)
+                        skb->mark = config->dns_fwmark;
+                }
             }
         }
         return TC_ACT_OK;

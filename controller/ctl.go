@@ -79,6 +79,8 @@ type controller struct {
 	egressNextIndex   uint8
 	// DNS 重定向目标（控制面配置，启动时同步到 dns_redirect_map）
 	dnsRedirectTarget bpf.FilterDnsRedirectTarget
+	// TPROXY mark（控制面配置，启动时同步到 tproxy_config_map，并用于策略路由）。
+	tproxyConfig bpf.FilterTproxyConfig
 	// DNS 透明代理回包路由：按原始目的地址维护 IP_TRANSPARENT 回包 socket
 	dnsReplyRouter *dnsReplyRouter
 	// 源地址白名单（持久化在数据库，启动加载并同步到 src_whitelist_map，运行时可动态调整）
@@ -115,6 +117,13 @@ type controller struct {
 
 // applyConfig 把控制面配置转换成 BPF 运行时参数。
 func (c *controller) applyConfig(cfg config.Config) {
+	tproxyConfig, err := bpf.NewTproxyConfig(cfg.DNSTproxyFwmark, cfg.TCPTproxyFwmark)
+	if err != nil {
+		slog.Error("invalid tproxy fwmark configuration, using defaults", "err", err)
+		tproxyConfig, _ = bpf.NewTproxyConfig(bpf.DefaultDnsTproxyFwmark, bpf.DefaultTcpTproxyFwmark)
+	}
+	c.tproxyConfig = tproxyConfig
+
 	target, err := bpf.NewDnsRedirectTarget(netip.AddrFrom4([4]byte{127, 0, 0, 1}), cfg.DNSPort)
 	if err != nil {
 		slog.Error("invalid dns redirect target, dns interception disabled",
